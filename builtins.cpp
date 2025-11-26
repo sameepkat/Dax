@@ -4,6 +4,7 @@
 #include <string>
 #include <unistd.h>
 #include <unordered_map>
+#include <cctype>
 #include <vector>
 #include <iostream>
 #include <stdlib.h>
@@ -21,6 +22,9 @@ BuiltinFunc handle_builtin(const std::vector<std::string> &input) {
       {"echo", builtin_echo},
       {"pwd", builtin_pwd},
       {"export", builtin_export},
+      {"alias", builtin_alias},
+      {"unalias", builtin_unalias},
+      {"history", builtin_history},
         };
 
   if (input.empty())
@@ -54,6 +58,7 @@ bool builtin_cd(const std::vector<std::string> &input) {
 }
 
 bool builtin_pwd(const std::vector<std::string> &input){
+    if(input[0] != "pwd") return false;
     char curr_dir[1024];
     if (getcwd(curr_dir, sizeof(curr_dir)) != nullptr) {
         std::cout << curr_dir << "\n";
@@ -65,7 +70,7 @@ bool builtin_pwd(const std::vector<std::string> &input){
 
 bool builtin_echo(const std::vector<std::string> &input) {
     if(input.size() < 1) return false;
-  for (int i = 1; i < input.size(); i++) {
+  for (size_t i = 1; i < input.size(); i++) {
       std::cout << input[i] << " ";
   }
     std::cout << "\n";
@@ -86,7 +91,6 @@ bool builtin_export(const std::vector<std::string> &input){
     std::string value = key_val[1];
     shell_vars[key] = value;
 
-    print_table(shell_vars);
 
     if (setenv(key.c_str(), value.c_str(), 1) != 0) {
         std::cerr << "setenv failed.\n ";
@@ -96,10 +100,53 @@ bool builtin_export(const std::vector<std::string> &input){
     return true;
 }
 
-bool builtin_alias(const std::vector<std::string> &) {
-    return false;
+bool builtin_alias(const std::vector<std::string> &input) {
+ if (input.size() < 2) {
+        std::cerr << "alias: missing destination\n";
+        return false;
+    }
+
+    std::vector<std::string> key_val = extract_key_value(input[1]);
+    if (key_val.size() != 2) {
+        std::cerr << "can't find key value pair.\n";
+        return false;
+    }
+    std::string key = key_val[0];
+    std::string value = key_val[1];
+    alias_map[key] = value;
+    return true;
 }
-bool builtin_unalias(const std::vector<std::string> &) {
-    return false;
+bool builtin_unalias(const std::vector<std::string> &input) {
+    if (input.size() < 2) {
+        std::cerr << "unalias: missing destination\n";
+        return false;
+    }
+    std::string key = input[1];
+    alias_map.erase(key);
+    return true;
 }
 
+bool builtin_history(const std::vector<std::string> &input){
+    if(input.empty()) return false;
+
+    if(input.size() == 1){
+        History::print();
+        return true;
+    }
+
+    bool is_numeric = true;
+    for(char c : input[1]) {
+        if(!isdigit(c)) {
+            is_numeric = false;
+            break;
+        }
+    }
+
+    if(is_numeric){
+        int num = std::stoi(input[1]);
+        History::print(num);
+    } else {
+        std::cerr << "history: numeric argument required\n";
+    }
+    return true;
+}

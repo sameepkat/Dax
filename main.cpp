@@ -6,6 +6,7 @@
 #include "signal_handler.hpp"
 #include "builtins.hpp"
 #include "tokenizer.hpp"
+#include "helper.hpp"
 
 int main() {
   std::string line;
@@ -19,6 +20,9 @@ int main() {
     std::cout.flush();
     if (!std::getline(std::cin, line)) break;
     
+    if(line.empty()) continue;
+    History::add(line);
+
     tokens = tokenize(line);
     if(tokens.empty()) continue;
 

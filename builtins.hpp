@@ -1,7 +1,6 @@
 #include <functional>
 #include <string>
 #include <vector>
-
 using BuiltinFunc = std::function<bool(const std::vector<std::string>&)>;
 
 bool builtin_exit(const std::vector<std::string>&);
