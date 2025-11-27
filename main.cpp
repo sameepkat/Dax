@@ -7,6 +7,7 @@
 #include "builtins.hpp"
 #include "tokenizer.hpp"
 #include "helper.hpp"
+#include "parser.hpp"
 
 int main() {
   std::string line;
@@ -26,19 +27,28 @@ int main() {
     tokens = tokenize(line);
     if(tokens.empty()) continue;
 
+    // For now, we just parse and print the AST to verify
+    try {
+        auto ast = parse(tokens);
+        if (ast) {
+            std::cout << "AST Structure:\n";
+            ast->print();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Parse Error: " << e.what() << "\n";
+    }
+
     if(handle_builtin(tokens)) continue;
 
 
     //std::cout << "Not a built-in command: " << tokens[0] << "\n";
 
-     std::cout << "Tokens: \n";
      std::cout << "Tokens: [";
-     for (const std::string& token: tokens) {
-         std::cout << token << "," ;
+     for (size_t i = 0; i < tokens.size(); ++i) {
+         std::cout << tokens[i];
+         if (i < tokens.size() - 1) std::cout << ",";
      }
-     std::cout << "]";
-     std::cout << "\n";
+     std::cout << "]\n";
    }
-  std::cout << "Token size: " << tokens.size() << "\n";
   return 0;
 }

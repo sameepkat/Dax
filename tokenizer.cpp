@@ -4,45 +4,58 @@
 #include <sstream>
 
 std::vector<std::string> tokenize(const std::string &line) {
-  enum State { NORMAL , IN_SINGLE , IN_DOUBLE } state = NORMAL;
+  enum State { NORMAL, IN_SINGLE, IN_DOUBLE } state = NORMAL;
   std::vector<std::string> tokens;
-  std::string token, buf;
+  std::string buf;
 
-  tokens.clear();
-  std::istringstream stream(line);
-  // while(stream >> token) tokens.push_back(token);
-
-
-  for (size_t i=0; i<line.size(); ++i) {
-      //std::cout << line[i] << "|";
-
+  for (size_t i = 0; i < line.size(); ++i) {
+    char c = line[i];
     switch (state) {
     case NORMAL:
-        if(line[i]=='\''){state = IN_SINGLE;}
-        else if(line[i] == '"') { state = IN_DOUBLE;
-        } else if (std::isspace(line[i])) {
-            if(!buf.empty()){tokens.push_back(buf); buf.clear();}
-        } else {
-            buf += line[i];
+      if (c == '\'') {
+        state = IN_SINGLE;
+      } else if (c == '"') {
+        state = IN_DOUBLE;
+      } else if (c == '|' || c == ';' || c == '<' || c == '>') {
+        if (!buf.empty()) {
+          tokens.push_back(buf);
+          buf.clear();
         }
-        break;
+        if (c == '>' && i + 1 < line.size() && line[i + 1] == '>') {
+          tokens.push_back(">>");
+          i++; 
+        } else {
+          tokens.push_back(std::string(1, c));
+        }
+      } else if (std::isspace(c)) {
+        if (!buf.empty()) {
+          tokens.push_back(buf);
+          buf.clear();
+        }
+      } else {
+        buf += c;
+      }
+      break;
 
     case IN_SINGLE:
-      if (line[i] == '\'')
+      if (c == '\'') {
         state = NORMAL;
-      else
-        buf += line[i];
+      } else {
+        buf += c;
+      }
       break;
 
     case IN_DOUBLE:
-        if (line[i] == '"')
-          state = NORMAL;
-        else
-            buf += line[i];
+      if (c == '"') {
+        state = NORMAL;
+      } else {
+        buf += c;
+      }
       break;
     }
-  } 
+  }
 
-  if(!buf.empty()) tokens.push_back(buf);
+  if (!buf.empty())
+    tokens.push_back(buf);
   return tokens;
 }
