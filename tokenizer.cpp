@@ -13,7 +13,7 @@ std::vector<std::string> tokenize(const std::string &line) {
   // while(stream >> token) tokens.push_back(token);
 
 
-  for (int i=0; i<line.size(); ++i) {
+  for (size_t i=0; i<line.size(); ++i) {
       //std::cout << line[i] << "|";
 
     switch (state) {

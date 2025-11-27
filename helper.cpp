@@ -41,7 +41,7 @@ namespace History{
   }
 
   void print(int num){
-    for (int i = history.size() - num; i < history.size(); --i) {
+    for (size_t i = history.size() - num; i < history.size(); --i) {
         std::cout << history[i] << "\n";
     }
   }
