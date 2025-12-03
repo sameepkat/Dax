@@ -1,5 +1,12 @@
 #include "parser.hpp"
+#include "builtins.hpp"
 #include <stdexcept>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <cstring>
+#include <vector>
+
 
 void CommandNode::print(int indent) const {
     std::string padding(indent, ' ');
@@ -19,6 +26,136 @@ void PipeNode::print(int indent) const {
     if (left) left->print(indent + 2);
     if (right) right->print(indent + 2);
 }
+
+int CommandNode::execute() {
+    // 1. Handle Redirections
+    int saved_stdin = dup(STDIN_FILENO);
+    int saved_stdout = dup(STDOUT_FILENO);
+
+    for (const auto& red : redirections) {
+        int fd;
+        if (red.type == "<") {
+            fd = open(red.filename.c_str(), O_RDONLY);
+            if (fd < 0) {
+                perror("open input");
+                return 1;
+            }
+            dup2(fd, STDIN_FILENO);
+            close(fd);
+        } else if (red.type == ">") {
+            fd = open(red.filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                perror("open output");
+                return 1;
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        } else if (red.type == ">>") {
+            fd = open(red.filename.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd < 0) {
+                perror("open append");
+                return 1;
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        }
+    }
+
+    // 2. Handle Builtins
+    if (!args.empty() && handle_builtin(args)) {
+        // Restore FDs
+        dup2(saved_stdin, STDIN_FILENO);
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdin);
+        close(saved_stdout);
+        return 0;
+    }
+
+    // 3. Prepare arguments
+    std::vector<char*> c_args;
+    for (const auto& arg : args) {
+        c_args.push_back(const_cast<char*>(arg.c_str()));
+    }
+    c_args.push_back(nullptr);
+
+    // 3. Fork and Exec
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child process
+        execvp(c_args[0], c_args.data());
+        perror("execvp");
+        exit(1);
+    } else if (pid < 0) {
+        perror("fork");
+        return 1;
+    } else {
+        // Parent process
+        int status;
+        waitpid(pid, &status, 0);
+        
+        // Restore FDs
+        dup2(saved_stdin, STDIN_FILENO);
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdin);
+        close(saved_stdout);
+
+        if (WIFEXITED(status)) {
+            return WEXITSTATUS(status);
+        }
+        return 1;
+    }
+}
+
+int PipeNode::execute() {
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        perror("pipe");
+        return 1;
+    }
+
+    pid_t pid1 = fork();
+    if (pid1 == 0) {
+        // Left child (writer)
+        close(pipefd[0]); // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        
+        if (left) exit(left->execute());
+        exit(0);
+    }
+
+    pid_t pid2 = fork();
+    if (pid2 == 0) {
+        // Right child (reader)
+        close(pipefd[1]); // Close write end
+        dup2(pipefd[0], STDIN_FILENO);
+        close(pipefd[0]);
+
+        if (right) exit(right->execute());
+        exit(0);
+    }
+
+    // Parent
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    int status1, status2;
+    waitpid(pid1, &status1, 0);
+    waitpid(pid2, &status2, 0);
+
+    if (WIFEXITED(status2)) {
+        return WEXITSTATUS(status2);
+    }
+    return 1;
+}
+
+int ListNode::execute() {
+    int status = 0;
+    if (left) status = left->execute();
+    if (right) status = right->execute();
+    return status;
+}
+
 
 void ListNode::print(int indent) const {
     std::string padding(indent, ' ');

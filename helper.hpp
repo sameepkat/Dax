@@ -1,4 +1,5 @@
-
+#ifndef HELPER_HPP
+#define HELPER_HPP
 #include <iostream>
 #include <vector>
 #include <unordered_map>
@@ -17,3 +18,4 @@ namespace History{
   void clear();
   void remove(int index);
 }
+#endif

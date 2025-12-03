@@ -14,6 +14,7 @@ struct Redirection {
 struct ASTNode {
     virtual ~ASTNode() = default;
     virtual void print(int indent = 0) const = 0;
+    virtual int execute() = 0;
 };
 
 struct CommandNode : public ASTNode {
@@ -21,6 +22,7 @@ struct CommandNode : public ASTNode {
     std::vector<Redirection> redirections;
 
     void print(int indent = 0) const override;
+    int execute() override;
 };
 
 struct PipeNode : public ASTNode {
@@ -31,6 +33,7 @@ struct PipeNode : public ASTNode {
         : left(std::move(l)), right(std::move(r)) {}
 
     void print(int indent = 0) const override;
+    int execute() override;
 };
 
 struct ListNode : public ASTNode {
@@ -41,6 +44,7 @@ struct ListNode : public ASTNode {
         : left(std::move(l)), right(std::move(r)) {}
 
     void print(int indent = 0) const override;
+    int execute() override;
 };
 
 std::unique_ptr<ASTNode> parse(const std::vector<std::string>& tokens);
