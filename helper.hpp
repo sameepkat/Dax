@@ -10,6 +10,8 @@ void print_vector(const std::vector<std::string> &vector);
 
 void print_table(const std::unordered_map<std::string, std::string> &);
 
+void print_prompt();
+
 
 namespace History{
   void add(const std::string &line);

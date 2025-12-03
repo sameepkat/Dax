@@ -13,12 +13,10 @@ int main() {
   std::string line;
   std::vector<std::string> tokens;
 
-  std::signal(SIGINT, SIG_IGN);
-  std::signal(SIGCHLD, SIG_IGN);
+  setup_signals();
 
   while (true) {
-    std::cout << "> ";
-    std::cout.flush();
+    print_prompt();
     if (!std::getline(std::cin, line)) break;
     
     if(line.empty()) continue;

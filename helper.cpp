@@ -1,4 +1,6 @@
 #include "helper.hpp"
+#include <unistd.h>
+#include <cstdlib>
 
 std::vector<std::string> extract_key_value(const std::string &token) {
   auto pos = token.find('=');
@@ -24,6 +26,24 @@ void print_table(const std::unordered_map<std::string, std::string> &shellvar_ma
         // Print each key-value pair
         std::cout << "Key: [" << key << "] Value: [" << value << "]\n";
     }
+}
+
+void print_prompt() {
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+        std::string path(cwd);
+        const char* home = getenv("HOME");
+        if (home) {
+            std::string home_str(home);
+            if (path.find(home_str) == 0) {
+                path.replace(0, home_str.length(), "~");
+            }
+        }
+        std::cout << path << " > ";
+    } else {
+        std::cout << "> ";
+    }
+    std::cout.flush();
 }
 
 
