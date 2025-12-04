@@ -19,5 +19,8 @@ namespace History{
   void print(int num);
   void clear();
   void remove(int index);
+  const std::vector<std::string>& get_all();
+  void load_from_file();
+  void save_to_file();
 }
 #endif

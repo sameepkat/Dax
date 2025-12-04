@@ -3,6 +3,8 @@
 #include <string>
 #include <csignal>
 #include <vector>
+#include <readline/readline.h>
+#include <readline/history.h>
 #include "signal_handler.hpp"
 #include "builtins.hpp"
 #include "tokenizer.hpp"
@@ -15,11 +17,52 @@ int main() {
 
   setup_signals();
 
+  // Load history from file on startup
+  History::load_from_file();
+  
+  // Set history size limit to 1000 commands
+  stifle_history(1000);
+
+  // Load existing history into readline
+  const auto& hist = History::get_all();
+  for (const auto& cmd : hist) {
+    add_history(cmd.c_str());
+  }
+
   while (true) {
-    print_prompt();
-    if (!std::getline(std::cin, line)) break;
+    // Get prompt string
+    char cwd[1024];
+    std::string prompt_str;
+    if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+        std::string path(cwd);
+        const char* home = getenv("HOME");
+        if (home) {
+            std::string home_str(home);
+            if (path.find(home_str) == 0) {
+                path.replace(0, home_str.length(), "~");
+            }
+        }
+        prompt_str = path + " > ";
+    } else {
+        prompt_str = "> ";
+    }
+
+    // Use readline for input with arrow key support
+    char* input = readline(prompt_str.c_str());
+    
+    // Handle Ctrl+D (EOF)
+    if (!input) {
+      std::cout << "\n";
+      break;
+    }
+    
+    line = input;
+    free(input);
     
     if(line.empty()) continue;
+    
+    // Add to both readline history and our History namespace
+    add_history(line.c_str());
     History::add(line);
 
     tokens = tokenize(line);
@@ -45,5 +88,9 @@ int main() {
     //  }
     //  std::cout << "]\n";
    }
+  
+  // Save history to file before exiting
+  History::save_to_file();
+  
   return 0;
 }

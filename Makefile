@@ -10,7 +10,7 @@ $(shell mkdir -p build)
 
 # Declare the target and its dependencies
 $(TARGET): $(OBJ)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJ)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJ) -lreadline
 
 # Rule for generating object files from source files
 build/%.o: %.cpp

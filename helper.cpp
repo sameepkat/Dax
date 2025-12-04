@@ -1,6 +1,7 @@
 #include "helper.hpp"
 #include <unistd.h>
 #include <cstdlib>
+#include <readline/history.h>
 
 std::vector<std::string> extract_key_value(const std::string &token) {
   auto pos = token.find('=');
@@ -72,5 +73,25 @@ namespace History{
 
   void remove(int index){
     history.erase(history.begin() + index);
+  }
+
+  const std::vector<std::string>& get_all(){
+    return history;
+  }
+
+  void load_from_file(){
+    const char* home = getenv("HOME");
+    if (!home) return;
+    
+    std::string history_file = std::string(home) + "/.dax_history";
+    read_history(history_file.c_str());
+  }
+
+  void save_to_file(){
+    const char* home = getenv("HOME");
+    if (!home) return;
+    
+    std::string history_file = std::string(home) + "/.dax_history";
+    write_history(history_file.c_str());
   }
 }
