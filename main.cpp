@@ -30,21 +30,28 @@ int main() {
   }
 
   while (true) {
-    // Get prompt string
     char cwd[1024];
     std::string prompt_str;
     if (getcwd(cwd, sizeof(cwd)) != nullptr) {
         std::string path(cwd);
-        const char* home = getenv("HOME");
-        if (home) {
-            std::string home_str(home);
-            if (path.find(home_str) == 0) {
-                path.replace(0, home_str.length(), "~");
+        std::string dir_name;
+        
+        if (path == "/") {
+            dir_name = "/";
+        } else {
+            size_t last_slash = path.find_last_of('/');
+            if (last_slash != std::string::npos) {
+                dir_name = path.substr(last_slash + 1);
+            } else {
+                dir_name = path;
             }
         }
-        prompt_str = path + " > ";
+        
+        // Green color: \033[1;32m, Reset: \033[0m
+        // \001 and \002 are used to tell readline these are non-printing characters
+        prompt_str = "\001\033[1;32m\002" + dir_name + " > \001\033[0m\002";
     } else {
-        prompt_str = "> ";
+        prompt_str = "\001\033[1;32m\002> \001\033[0m\002";
     }
 
     // Use readline for input with arrow key support

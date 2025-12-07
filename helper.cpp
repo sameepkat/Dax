@@ -2,6 +2,8 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <readline/history.h>
+#include <filesystem>
+namespace fs = std::filesystem;
 
 std::vector<std::string> extract_key_value(const std::string &token) {
   auto pos = token.find('=');
@@ -32,17 +34,13 @@ void print_table(const std::unordered_map<std::string, std::string> &shellvar_ma
 void print_prompt() {
     char cwd[1024];
     if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-        std::string path(cwd);
-        const char* home = getenv("HOME");
-        if (home) {
-            std::string home_str(home);
-            if (path.find(home_str) == 0) {
-                path.replace(0, home_str.length(), "~");
-            }
-        }
-        std::cout << path << " > ";
+        fs::path path(cwd);
+        std::string dir_name = path.filename().string();
+        if (dir_name.empty()) dir_name = "/";
+        
+        std::cout << "\033[1;32m" << dir_name << " > \033[0m";
     } else {
-        std::cout << "> ";
+        std::cout << "\033[1;32m> \033[0m";
     }
     std::cout.flush();
 }
@@ -50,7 +48,6 @@ void print_prompt() {
 
 namespace History{
   static std::vector<std::string> history;
-
   void add(const std::string &line){
     history.push_back(line);
   }
