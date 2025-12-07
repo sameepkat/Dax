@@ -40,6 +40,7 @@ BuiltinFunc handle_builtin(const std::vector<std::string> &input) {
 
 bool builtin_exit(const std::vector<std::string> &input) {
     if(input.empty() || input[0] != "exit") return false;
+    History::save_to_file();
     exit(0);
 }
 
