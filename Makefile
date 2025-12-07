@@ -3,7 +3,7 @@ CXXFLAGS = -Wall -Wextra -std=c++17
 
 SRC = $(wildcard *.cpp)
 OBJ = $(patsubst %.cpp, build/%.o, $(SRC))  # Object files in build/ directory
-TARGET = main
+TARGET = dax
 
 # Create build/ directory if it doesn't exist
 $(shell mkdir -p build)
