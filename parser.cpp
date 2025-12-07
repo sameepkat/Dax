@@ -82,6 +82,10 @@ int CommandNode::execute() {
     pid_t pid = fork();
     if (pid == 0) {
         // Child process
+        // Reset signals to default
+        signal(SIGINT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+
         execvp(c_args[0], c_args.data());
         perror("execvp");
         exit(1);
@@ -116,6 +120,10 @@ int PipeNode::execute() {
     pid_t pid1 = fork();
     if (pid1 == 0) {
         // Left child (writer)
+        // Reset signals to default
+        signal(SIGINT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+
         close(pipefd[0]); // Close read end
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
@@ -127,6 +135,10 @@ int PipeNode::execute() {
     pid_t pid2 = fork();
     if (pid2 == 0) {
         // Right child (reader)
+        // Reset signals to default
+        signal(SIGINT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+
         close(pipefd[1]); // Close write end
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
