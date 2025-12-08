@@ -48,11 +48,33 @@ bool builtin_cd(const std::vector<std::string> &input) {
     if(input.empty() || input[0] != "cd") return false;
 
     if (input.size() < 2) {
-      std::cerr << "cd: missing destination\n";
-      return true;
+        const char* home = getenv("HOME");
+        if(home != nullptr){
+            chdir(home);
+        }else{
+            std::cerr << "cd: Couldn't find home directory\n";
+        }
+        return true;
     }
 
-    if (chdir(input[1].c_str()) != 0) {
+    std::string path = input[1];
+    
+    // Expand tilde to home directory
+    if (path[0] == '~') {
+        const char* home = getenv("HOME");
+        if (home != nullptr) {
+            if (path.length() == 1) {
+                path = home;
+            } else if (path[1] == '/') {
+                path = std::string(home) + path.substr(1);
+            }
+        } else {
+            std::cerr << "cd: HOME not set\n";
+            return true;
+        }
+    }
+
+    if (chdir(path.c_str()) != 0) {
         std::cerr << "cd: " << strerror(errno) << "\n";
     }
     return true;
