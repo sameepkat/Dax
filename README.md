@@ -22,7 +22,9 @@ Dax is a custom Unix shell implementation written in C++. It provides a familiar
   output (`echo`, `printf`, `read`, `test`, `[`, `eval`, `source`, `.`); job
   control (`jobs`, `fg`, `bg`, `wait`, `disown`, `kill`, `suspend`); aliases,
   options, traps, loop control, `true`, `false`, and `exit`.
-- **History Management**: Persistent command history saved to `~/.dax_history`. Supports arrow key navigation (via `readline`).
+- **Interactive Editing**: Persistent history in `~/.dax_history`, inline history autosuggestions accepted with Right Arrow or End, and Tab completion for commands, builtins, aliases, shell functions, variables, files, and directories.
+- **Interactive Colors**: The default `dax` scheme highlights known commands green, unknown commands red, and history suggestions gray. Select `high-contrast` or `no-color` in `~/.config/dax/init.janet` with `(dax/set-colorscheme "high-contrast")`. `NO_COLOR` disables Dax theme colors.
+- **Git Prompt**: In a Git repository, the default prompt shows the current branch in brackets, for example `Dax [main] >`. Disable it in `~/.config/dax/init.janet` with `(dax/set-git-branch false)`.
 - **Signal Handling**: Handles `SIGINT` (Ctrl+C), shell signal traps, and exit traps.
 - **Janet Scripting**: Run embedded Janet 1.42.1 scripts with Dax state helpers.
 
@@ -118,14 +120,19 @@ last command's status.
 Janet startup configuration is read from
 `$XDG_CONFIG_HOME/dax/init.janet`, or `~/.config/dax/init.janet` when
 `XDG_CONFIG_HOME` is unset. Startup errors are reported and Dax continues to
-the interactive prompt. The `dax/cd`, `dax/cwd`, `dax/getenv`,
+the interactive prompt. In a running shell, `source file.janet` or
+`. file.janet` evaluates a Janet file in the current runtime, so aliases,
+environment changes, and colorscheme settings take effect immediately;
+registered startup hooks run after each successful Janet source. Other files
+continue to use Dax shell syntax. The `dax/cd`, `dax/cwd`, `dax/getenv`,
 `dax/setenv`, and `dax/execute` functions operate against Dax state.
 `dax/execute` accepts an argv array or tuple and an optional table with
 `:cwd`, `:env`, `:timeout-ms`, `:capture-output`, and `:max-output-bytes`. It
 returns a table containing `:stdout`, `:stderr`, `:exit-code`, `:timed-out`,
 and `:truncated`. It never parses the argument vector as shell source.
-`dax/alias`, `dax/set-prompt`, and `(dax/on :startup fn)` support startup
-configuration. Janet's own `os/*` functions remain available to trusted scripts
+`dax/alias`, `dax/set-prompt`, `dax/set-colorscheme`, `dax/set-git-branch`, and `(dax/on :startup fn)` support startup
+configuration. Choose `"dax"`, `"high-contrast"`, or `"no-color"` with
+`(dax/set-colorscheme "dax")`; `NO_COLOR` disables Dax theme colors. Janet's own `os/*` functions remain available to trusted scripts
 and do not share Dax's shell state.
 
 Restricted Janet scripts run with

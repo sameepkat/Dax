@@ -1,5 +1,6 @@
 #include "builtins.hpp"
 #include "helper.hpp"
+#include "janet_runtime.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -919,6 +920,13 @@ std::optional<int> run(const std::vector<std::string> &a) {
   if (c == "source" || c == ".") {
     if (a.size() < 2)
       return 2;
+    if (std::filesystem::path(a[1]).extension() == ".janet") {
+      if (!janet_runtime_start()) {
+        std::cerr << "dax: could not initialize Janet runtime\n";
+        return 1;
+      }
+      return janet_source_file(a[1], std::vector<std::string>(a.begin() + 2, a.end()));
+    }
     std::ifstream f(a[1]);
     if (!f) {
       perror(a[1].c_str());
@@ -1073,6 +1081,58 @@ bool is_builtin(const std::string &n) {
       "getopts", "trap",     "autoload", "break", "continue", ":",
       "umask", "times", "ulimit", "exec", "fc"};
   return std::find(names.begin(), names.end(), n) != names.end();
+}
+bool shell_command_resolves(const std::string &name) {
+  return is_builtin(name) || aliases.count(name) != 0 || functions.count(name) != 0 ||
+         find_command(name).has_value();
+}
+std::vector<std::string> shell_completion_candidates(const std::string &prefix,
+                                                     bool command_position,
+                                                     bool variable_name) {
+  std::vector<std::string> result;
+  auto add = [&](const std::string &candidate) {
+    if (candidate.rfind(prefix, 0) == 0 &&
+        std::find(result.begin(), result.end(), candidate) == result.end())
+      result.push_back(candidate);
+  };
+  if (variable_name) {
+    for (const auto &[name, value] : vars) { (void)value; add(name); }
+    extern char **environ;
+    for (char **entry = environ; entry && *entry; ++entry) {
+      const char *equals = std::strchr(*entry, '=');
+      if (equals) add(std::string(*entry, static_cast<size_t>(equals - *entry)));
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+  if (command_position && prefix.find('/') == std::string::npos) {
+    static const std::vector<std::string> builtins = {
+        ":", "alias", "bg", "break", "builtin", "cd", "command", "continue",
+        "dirs", "disown", "echo", "eval", "exec", "exit", "export", "false",
+        "fc", "fg", "getopts", "hash", "history", "jobs", "kill", "local",
+        "popd", "printf", "pushd", "pwd", "read", "readonly", "return", "set",
+        "setopt", "shift", "source", "suspend", "test", "times", "trap", "true",
+        "type", "typeset", "ulimit", "unalias", "unset", "unsetopt", "wait", "which",
+        "whence"};
+    for (const auto &name : builtins) add(name);
+    for (const auto &[name, value] : aliases) { (void)value; add(name); }
+    for (const auto &[name, body] : functions) { (void)body; add(name); }
+    const char *path = std::getenv("PATH");
+    std::stringstream directories(path ? path : "");
+    std::string directory;
+    while (std::getline(directories, directory, ':')) {
+      if (directory.empty()) directory = ".";
+      std::error_code error;
+      for (std::filesystem::directory_iterator it(directory, error), end;
+           !error && it != end; it.increment(error)) {
+        const std::string name = it->path().filename().string();
+        if (name.rfind(prefix, 0) == 0 && access(it->path().c_str(), X_OK) == 0) add(name);
+      }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+  return result;
 }
 void remember_job(int pid, const std::string &cmd) {
   int id = jobs.empty() ? 1 : jobs.back().id + 1;

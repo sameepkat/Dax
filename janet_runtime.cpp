@@ -30,6 +30,8 @@
 namespace {
 JanetTable *environment = nullptr;
 std::string prompt_override;
+std::string colorscheme_override = "dax";
+bool git_branch_enabled = true;
 struct AgentSession { std::string workspace; std::string temporary; int timeout_ms; bool network; size_t output_limit; };
 std::unordered_map<int32_t, AgentSession> sessions;
 int32_t next_session_id = 1;
@@ -296,6 +298,25 @@ Janet c_set_prompt(int32_t argc, Janet *argv) {
   if (!value) janet_panic("set-prompt expects a string");
   prompt_override = value;
   return janet_cstringv(prompt_override.c_str());
+}
+
+Janet c_set_colorscheme(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 1);
+  const char *value = janet_getcstring(argv, 0);
+  if (!value) janet_panic("set-colorscheme expects a scheme name string");
+  const std::string name(value);
+  if (name != "dax" && name != "high-contrast" && name != "no-color")
+    janet_panic("set-colorscheme supports: dax, high-contrast, no-color");
+  colorscheme_override = name;
+  return janet_cstringv(colorscheme_override.c_str());
+}
+
+Janet c_set_git_branch(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 1);
+  if (!janet_checktype(argv[0], JANET_BOOLEAN))
+    janet_panic("set-git-branch expects a boolean");
+  git_branch_enabled = janet_unwrap_boolean(argv[0]);
+  return janet_wrap_boolean(git_branch_enabled);
 }
 
 Janet c_on(int32_t argc, Janet *argv) {
@@ -691,6 +712,8 @@ Janet c_remove_tree(int32_t argc, Janet *argv) {
 const JanetReg dax_functions[] = {
     {"alias", c_alias, "Define a Dax shell alias."},
     {"set-prompt", c_set_prompt, "Set the interactive Dax prompt."},
+    {"set-colorscheme", c_set_colorscheme, "Select Dax's interactive color scheme."},
+    {"set-git-branch", c_set_git_branch, "Show or hide the Git branch in the interactive prompt."},
     {"on", c_on, "Register a Dax lifecycle callback."},
     {"cwd", c_cwd, "Return Dax's current working directory."},
     {"getenv", c_getenv, "Read an environment variable."},
@@ -704,14 +727,16 @@ const JanetReg dax_functions[] = {
     {"remove-tree", c_remove_tree, "Request approval and remove a validated workspace subtree."},
     {nullptr, nullptr, nullptr}};
 
-int eval(const std::string &source, const std::string &name) {
+int eval(const std::string &source, const std::string &name, bool *succeeded = nullptr) {
   Janet result;
   const int rc = janet_dostring(environment, source.c_str(), name.c_str(), &result);
   if (rc) {
+    if (succeeded) *succeeded = false;
     JanetString message = janet_to_string(result);
     std::fprintf(stderr, "dax: Janet error: %s\n", message);
     return 1;
   }
+  if (succeeded) *succeeded = true;
   return janet_checkint(result) ? (janet_unwrap_integer(result) & 255) : 0;
 }
 } // namespace
@@ -722,6 +747,8 @@ bool janet_runtime_start() {
   environment = janet_core_env(nullptr);
   janet_cfuns_prefix(environment, "dax", dax_functions);
   prompt_override.clear();
+  colorscheme_override = "dax";
+  git_branch_enabled = true;
   return environment != nullptr;
 }
 
@@ -733,6 +760,23 @@ int janet_run_file(const std::string &path, const std::vector<std::string> &args
   for (const auto &arg : args) janet_array_push(array, janet_cstringv(arg.c_str()));
   janet_def(environment, "args", janet_wrap_array(array), "Command-line arguments passed to this Janet script.");
   return eval(source, path);
+}
+
+int janet_source_file(const std::string &path, const std::vector<std::string> &args) {
+  std::ifstream file(path);
+  if (!file) {
+    std::fprintf(stderr, "dax: cannot open Janet file: %s\n", path.c_str());
+    return 127;
+  }
+  std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  JanetArray *array = janet_array(args.size());
+  for (const auto &arg : args) janet_array_push(array, janet_cstringv(arg.c_str()));
+  janet_def(environment, "args", janet_wrap_array(array), "Arguments passed to a sourced Janet file.");
+  bool succeeded = false;
+  const int result = eval(source, path, &succeeded);
+  if (!succeeded) return result;
+  const int hook_result = janet_run_startup_hook();
+  return hook_result ? hook_result : result;
 }
 
 int janet_run_restricted_file(const std::string &path, const std::string &workspace,
@@ -774,7 +818,7 @@ int janet_run_restricted_file(const std::string &path, const std::string &worksp
       remove_keys.push_back(key);
   }
   for (Janet key : remove_keys) janet_table_remove(environment, key);
-  for (const char *name : {"dax/alias", "dax/set-prompt", "dax/on", "dax/cd",
+  for (const char *name : {"dax/alias", "dax/set-prompt", "dax/set-colorscheme", "dax/set-git-branch", "dax/on", "dax/cd",
                            "dax/getenv", "dax/setenv", "dax/execute"})
     janet_table_remove(environment, janet_csymbolv(name));
 
@@ -810,6 +854,8 @@ int janet_run_startup_hook() {
 }
 
 const std::string &janet_prompt() { return prompt_override; }
+const std::string &janet_colorscheme() { return colorscheme_override; }
+bool janet_git_branch_enabled() { return git_branch_enabled; }
 
 void janet_runtime_stop() {
   if (!environment) return;
