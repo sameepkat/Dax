@@ -9,10 +9,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <glob.h>
+#include <fnmatch.h>
 #include <iostream>
+#include <pwd.h>
 #include <sstream>
 #include <sys/stat.h>
+#include <sys/resource.h>
+#include <sys/times.h>
+#include <ctime>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -159,6 +165,8 @@ std::optional<int> run(const std::vector<std::string> &a) {
   if (a.empty())
     return 0;
   const auto &c = a[0];
+  if (c == ":")
+    return 0;
   if (c == "true")
     return 0;
   if (c == "false")
@@ -225,6 +233,116 @@ std::optional<int> run(const std::vector<std::string> &a) {
       return 1;
     }
     std::cout << b << '\n';
+    return 0;
+  }
+  if (c == "umask") {
+    if (a.size() == 1) {
+      const mode_t current = umask(0);
+      umask(current);
+      std::cout << std::oct;
+      std::cout.width(4);
+      std::cout.fill('0');
+      std::cout << current << std::dec << '\n';
+      return 0;
+    }
+    size_t index = 1;
+    bool symbolic = a[index] == "-S";
+    if (symbolic) {
+      const mode_t current = umask(0);
+      umask(current);
+      const mode_t allowed = static_cast<mode_t>(~current) & 0777;
+      auto perms = [&](mode_t read, mode_t write, mode_t execute) {
+        std::string value;
+        value += (allowed & read) ? 'r' : '-';
+        value += (allowed & write) ? 'w' : '-';
+        value += (allowed & execute) ? 'x' : '-';
+        return value;
+      };
+      std::cout << "u=" << perms(S_IRUSR, S_IWUSR, S_IXUSR)
+                << ",g=" << perms(S_IRGRP, S_IWGRP, S_IXGRP)
+                << ",o=" << perms(S_IROTH, S_IWOTH, S_IXOTH) << '\n';
+      return a.size() == 2 ? 0 : 2;
+    }
+    if (a.size() != 2) return 2;
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long value = std::strtoul(a[index].c_str(), &end, 8);
+    if (errno || end == a[index].c_str() || *end || value > 0777) {
+      std::cerr << "umask: expected an octal mask from 000 to 777\n";
+      return 2;
+    }
+    umask(static_cast<mode_t>(value));
+    return 0;
+  }
+  if (c == "times") {
+    if (a.size() != 1) return 2;
+    struct tms usage{};
+    if (times(&usage) == static_cast<clock_t>(-1)) {
+      perror("times");
+      return 1;
+    }
+    const long ticks = sysconf(_SC_CLK_TCK);
+    auto print_time = [&](clock_t value) {
+      const double seconds = ticks > 0 ? static_cast<double>(value) / ticks : 0.0;
+      const long minutes = static_cast<long>(seconds / 60.0);
+      std::cout << minutes << 'm' << (seconds - minutes * 60.0) << "s";
+    };
+    print_time(usage.tms_utime); std::cout << ' ';
+    print_time(usage.tms_stime); std::cout << '\n';
+    print_time(usage.tms_cutime); std::cout << ' ';
+    print_time(usage.tms_cstime); std::cout << '\n';
+    return 0;
+  }
+  if (c == "ulimit") {
+    char option = 'f';
+    size_t index = 1;
+    if (index < a.size() && a[index].size() == 2 && a[index][0] == '-') {
+      option = a[index][1];
+      ++index;
+    }
+    auto resource_for = [&](char which) -> int {
+      if (which == 'f') return RLIMIT_FSIZE;
+#ifdef RLIMIT_NOFILE
+      if (which == 'n') return RLIMIT_NOFILE;
+#endif
+      return -1;
+    };
+    auto describe = [&](char which) {
+      const int resource = resource_for(which);
+      if (resource < 0) return false;
+      struct rlimit limit{};
+      if (getrlimit(resource, &limit) != 0) return false;
+      if (limit.rlim_cur == RLIM_INFINITY) std::cout << "unlimited\n";
+      else if (which == 'f') std::cout << (limit.rlim_cur / 512) << '\n';
+      else std::cout << limit.rlim_cur << '\n';
+      return true;
+    };
+    if (option == 'a') {
+      if (index != a.size()) return 2;
+      std::cout << "file size (blocks) "; describe('f');
+      std::cout << "open files         "; describe('n');
+      return 0;
+    }
+    const int resource = resource_for(option);
+    if (resource < 0) {
+      std::cerr << "ulimit: supported limits are -f, -n, and -a\n";
+      return 2;
+    }
+    struct rlimit limit{};
+    if (getrlimit(resource, &limit) != 0) { perror("ulimit"); return 1; }
+    if (index == a.size()) return describe(option) ? 0 : 1;
+    if (index + 1 != a.size()) return 2;
+    rlim_t parsed = RLIM_INFINITY;
+    if (a[index] != "unlimited") {
+      char *end = nullptr;
+      errno = 0;
+      unsigned long long value = std::strtoull(a[index].c_str(), &end, 10);
+      if (errno || end == a[index].c_str() || *end) return 2;
+      if (option == 'f') value *= 512;
+      parsed = static_cast<rlim_t>(value);
+    }
+    limit.rlim_cur = parsed;
+    if (setrlimit(resource, &limit) != 0) { perror("ulimit"); return 1; }
     return 0;
   }
   if (c == "echo") {
@@ -352,6 +470,33 @@ std::optional<int> run(const std::vector<std::string> &a) {
       }
     }
     return 0;
+  }
+  if (c == "fc") {
+    bool list = a.size() == 1 || (a.size() > 1 && a[1] == "-l");
+    if (list) {
+      const auto &items = History::get_all();
+      size_t first = items.size() > 16 ? items.size() - 16 : 0;
+      for (size_t i = first; i < items.size(); ++i)
+        std::cout << (i + 1) << "\t" << items[i] << '\n';
+      return 0;
+    }
+    if (a[1] == "-s") {
+      const auto &items = History::get_all();
+      if (items.empty()) return 1;
+      size_t selected = items.size() - 1;
+      if (items[selected].rfind("fc -s", 0) == 0 && selected) --selected;
+      std::string command = items[selected];
+      if (a.size() >= 3) {
+        const size_t eq = a[2].find('=');
+        if (eq == std::string::npos) return 2;
+        const size_t at = command.find(a[2].substr(0, eq));
+        if (at != std::string::npos) command.replace(at, eq, a[2].substr(eq + 1));
+      }
+      execute_line(command);
+      return last_status();
+    }
+    std::cerr << "fc: editor mode is not supported; use fc -l or fc -s\n";
+    return 2;
   }
   if (c == "command" || c == "builtin" || c == "type" || c == "whence" ||
       c == "which") {
@@ -925,7 +1070,8 @@ bool is_builtin(const std::string &n) {
       "disown",  "kill",     "suspend", "read",   "printf",  "test",
       "[",       "true",     "false",   "set",    "setopt",  "unsetopt",
       "hash",    "source",   ".",       "eval",   "return",  "shift",
-      "getopts", "trap",     "autoload", "break", "continue"};
+      "getopts", "trap",     "autoload", "break", "continue", ":",
+      "umask", "times", "ulimit", "exec", "fc"};
   return std::find(names.begin(), names.end(), n) != names.end();
 }
 void remember_job(int pid, const std::string &cmd) {
@@ -1059,9 +1205,68 @@ void expand_words(std::vector<std::string> &words) {
         patterns.back() += static_cast<char>(ch);
       }
     };
+    auto home_expand = [&](size_t start, size_t finish) -> std::optional<std::string> {
+      std::string user = w.substr(start + 1, finish - start - 1);
+      if (user.empty()) {
+        auto home = vars.find("HOME");
+        const char *env_home = std::getenv("HOME");
+        if (home != vars.end()) return home->second;
+        if (env_home) return std::string(env_home);
+        return {};
+      }
+      struct passwd *entry = getpwnam(user.c_str());
+      if (entry && entry->pw_dir) return std::string(entry->pw_dir);
+      return {};
+    };
+    size_t assignment_equal = std::string::npos;
+    for (size_t j = 0; j < w.size(); ++j) {
+      if (w[j] == '=') { assignment_equal = j; break; }
+      if (!(std::isalnum(static_cast<unsigned char>(w[j])) || w[j] == '_')) break;
+    }
     for (size_t i = 0; i < w.size(); ++i) {
       if (w[i] == '\x01') { literal = !literal; continue; }
       if (w[i] == '\x02') { double_quoted = !double_quoted; continue; }
+      if (!literal && !double_quoted && w[i] == '~' &&
+          (i == 0 || (assignment_equal != std::string::npos &&
+           (i == assignment_equal + 1 || (i > assignment_equal && w[i - 1] == ':'))))) {
+        size_t end = i + 1;
+        while (end < w.size() && w[end] != '/' && w[end] != ':') ++end;
+        auto home = home_expand(i, end);
+        if (home) { append_text(*home, false); i = end - 1; continue; }
+      }
+      if (w[i] == '\x07' && i + 1 < w.size() && w[i + 1] == '\x03') {
+        size_t end = w.find('\x03', i + 2);
+        if (end == std::string::npos) { fail_expansion(); break; }
+        std::string expr = w.substr(i + 2, end - i - 2);
+        if (expr.size() >= 2 && expr.front() == '(' && expr.back() == ')') expr = expr.substr(1, expr.size() - 2);
+        std::function<std::optional<long long>(std::string)> eval = [&](std::string e) -> std::optional<long long> {
+          auto trim = [](std::string &s) { while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin()); while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back(); };
+          trim(e);
+          while (e.size() >= 2 && e.front() == '(' && e.back() == ')') { e = e.substr(1, e.size()-2); trim(e); }
+          int depth = 0;
+          for (const std::string ops : {"|", "^", "&", "<<", ">>", "+-", "*/%"}) {
+            depth = 0;
+            for (size_t p = e.size(); p-- > 0;) {
+              if (e[p] == ')') ++depth; else if (e[p] == '(') --depth;
+              if (depth || p == 0 || ops.find(e[p]) == std::string::npos) continue;
+              if ((e[p] == '+' || e[p] == '-') && (p == 0 || std::string("+-*/%(<>").find(e[p-1]) != std::string::npos)) continue;
+              size_t width = (p && ((e.substr(p-1,2)=="<<") || (e.substr(p-1,2)==">>"))) ? 2 : 1;
+              if ((e.substr(p,2)=="<<") || (e.substr(p,2)==">>")) width = 2;
+              auto l = eval(e.substr(0,p)); auto r = eval(e.substr(p+width));
+              if (!l || !r) return {};
+              switch (e[p]) { case '+': return *l+*r; case '-': return *l-*r; case '*': return *l**r; case '/': if (!*r) return {}; return *l / *r; case '%': if (!*r) return {}; return *l % *r; case '&': return *l & *r; case '^': return *l ^ *r; case '|': return *l | *r; case '<': return *l << *r; case '>': return *l >> *r; }
+            }
+          }
+          if (!e.empty() && (e[0]=='+' || e[0]=='-' || e[0]=='!')) { auto v=eval(e.substr(1)); if(!v)return {}; return e[0]=='-'?-*v:e[0]=='!'?!*v:*v; }
+          if (!e.empty() && (std::isalpha((unsigned char)e[0]) || e[0]=='_')) { auto it=vars.find(e); const char *env=getenv(e.c_str()); e=it!=vars.end()?it->second:(env?env:"0"); trim(e); }
+          char *ep=nullptr; errno=0; long long value=std::strtoll(e.c_str(),&ep,0); if(errno || ep==e.c_str() || *ep)return {}; return value;
+        };
+        auto value = eval(expr);
+        if (!value) { fail_expansion(); break; }
+        append_text(std::to_string(*value), !double_quoted);
+        i = end;
+        continue;
+      }
       if (w[i] == '\x03') {
         size_t end = w.find('\x03', i + 1);
         if (end == std::string::npos) { fail_expansion(); break; }
@@ -1090,9 +1295,25 @@ void expand_words(std::vector<std::string> &words) {
         append_text(std::to_string(positionals.size()), !double_quoted); ++i; continue;
       }
       if (i + 1 < w.size() && (w[i + 1] == '@' || w[i + 1] == '*')) {
-        for (size_t j = 0; j < positionals.size(); ++j) {
-          if (j && !double_quoted) append_text(" ", true);
-          append_text(positionals[j], !double_quoted);
+        const char special = w[i + 1];
+        if (double_quoted && special == '@') {
+          for (size_t j = 0; j < positionals.size(); ++j) {
+            if (j) { fields.emplace_back(); patterns.emplace_back(); has_pattern.push_back(false); }
+            append_text(positionals[j], false);
+          }
+          if (positionals.empty() && fields.size() == 1 && fields[0].empty() && i == 0 && i + 2 == w.size()) fields.clear();
+        } else if (double_quoted) {
+          auto ifs = vars.find("IFS");
+          const char *env_ifs = std::getenv("IFS");
+          const std::string sep = ifs != vars.end() ? ifs->second : env_ifs ? env_ifs : " \t\n";
+          std::string value;
+          for (size_t j = 0; j < positionals.size(); ++j) { if (j && !sep.empty()) value += sep[0]; value += positionals[j]; }
+          append_text(value, false);
+        } else {
+          for (size_t j = 0; j < positionals.size(); ++j) {
+            if (j) append_text(" ", true);
+            append_text(positionals[j], true);
+          }
         }
         ++i; continue;
       }
@@ -1108,6 +1329,27 @@ void expand_words(std::vector<std::string> &words) {
           length_expansion = true;
           expression.erase(expression.begin());
         } else {
+          size_t removal_at = expression.find("##");
+          if (removal_at != std::string::npos) {
+            parameter_operator = "##";
+            parameter_word = expression.substr(removal_at + 2);
+            expression.resize(removal_at);
+          } else if ((removal_at = expression.find("%%")) != std::string::npos) {
+            parameter_operator = "%%";
+            parameter_word = expression.substr(removal_at + 2);
+            expression.resize(removal_at);
+          } else if ((removal_at = expression.find('#')) != std::string::npos) {
+            parameter_operator = "#";
+            parameter_word = expression.substr(removal_at + 1);
+            expression.resize(removal_at);
+          } else if ((removal_at = expression.find('%')) != std::string::npos) {
+            parameter_operator = "%";
+            parameter_word = expression.substr(removal_at + 1);
+            expression.resize(removal_at);
+          }
+          if (!parameter_operator.empty()) {
+            // Pattern-removal operators are handled after reading the variable.
+          } else {
           for (const std::string op : {":-", ":=", ":+", ":?"}) {
             size_t at = expression.find(op);
             if (at != std::string::npos) {
@@ -1116,6 +1358,7 @@ void expand_words(std::vector<std::string> &words) {
               expression.resize(at);
               break;
             }
+          }
           }
           if (parameter_operator.empty()) {
             for (const std::string op : {"-", "=", "+", "?"}) {
@@ -1154,6 +1397,25 @@ void expand_words(std::vector<std::string> &words) {
       std::string value = it != vars.end() ? it->second : (v ? v : "");
       if (length_expansion) {
         append_text(std::to_string(value.size()), !double_quoted);
+      } else if (parameter_operator == "#" || parameter_operator == "##" ||
+                 parameter_operator == "%" || parameter_operator == "%%") {
+        const bool prefix = parameter_operator[0] == '#';
+        const bool longest = parameter_operator.size() == 2;
+        std::string pattern = parameter_word;
+        pattern.erase(std::remove(pattern.begin(), pattern.end(), '\x01'), pattern.end());
+        pattern.erase(std::remove(pattern.begin(), pattern.end(), '\x02'), pattern.end());
+        if (prefix) {
+          size_t match = std::string::npos;
+          for (size_t n = 0; n <= value.size(); ++n)
+            if (fnmatch(pattern.c_str(), value.substr(0, n).c_str(), 0) == 0) { match = n; if (!longest) break; }
+          if (match != std::string::npos) value.erase(0, match);
+        } else {
+          size_t match = std::string::npos;
+          for (size_t n = 0; n <= value.size(); ++n)
+            if (fnmatch(pattern.c_str(), value.substr(n).c_str(), 0) == 0) { match = n; if (!longest) break; }
+          if (match != std::string::npos) value.erase(match);
+        }
+        append_text(value, !double_quoted);
       } else if (!parameter_operator.empty()) {
         const bool colon_operator = parameter_operator[0] == ':';
         const bool condition = colon_operator ? (!is_set || value.empty()) : !is_set;

@@ -131,7 +131,23 @@ int CommandNode::execute() {
       return 1;
     }
     const std::string &filename = target.front();
-    if (red.type == "<") {
+    if (red.type == "2>&" || red.type == ">&" || red.type == "<&") {
+      const int destination = red.type == "2>&" ? STDERR_FILENO :
+                             red.type == "<&" ? STDIN_FILENO : STDOUT_FILENO;
+      if (filename == "-") {
+        close(destination);
+      } else {
+        char *end = nullptr;
+        long source = std::strtol(filename.c_str(), &end, 10);
+        if (end == filename.c_str() || *end || source < 0 || source > 1024 ||
+            dup2(static_cast<int>(source), destination) < 0) {
+          std::cerr << "dax: " << red.type << ": bad file descriptor: " << filename << '\n';
+          dup2(saved_stdin, STDIN_FILENO); dup2(saved_stdout, STDOUT_FILENO); dup2(saved_stderr, STDERR_FILENO);
+          close(saved_stdin); close(saved_stdout); close(saved_stderr); restore_environment();
+          return 1;
+        }
+      }
+    } else if (red.type == "<") {
       fd = open(filename.c_str(), O_RDONLY);
       if (fd < 0) {
         perror("open input");
@@ -191,6 +207,30 @@ int CommandNode::execute() {
       }
       close(fd);
     }
+  }
+
+  if (!expanded.empty() && expanded[0] == "exec") {
+    if (expanded.size() == 1 && redirections.empty()) {
+      dup2(saved_stdin, STDIN_FILENO); dup2(saved_stdout, STDOUT_FILENO); dup2(saved_stderr, STDERR_FILENO);
+      close(saved_stdin); close(saved_stdout); close(saved_stderr); restore_environment();
+      return 0;
+    }
+    if (expanded.size() == 1) {
+      close(saved_stdin); close(saved_stdout); close(saved_stderr);
+      restore_environment();
+      return 0;
+    }
+    std::vector<char *> exec_args;
+    for (size_t i = 1; i < expanded.size(); ++i) exec_args.push_back(const_cast<char *>(expanded[i].c_str()));
+    exec_args.push_back(nullptr);
+    fcntl(saved_stdin, F_SETFD, FD_CLOEXEC); fcntl(saved_stdout, F_SETFD, FD_CLOEXEC); fcntl(saved_stderr, F_SETFD, FD_CLOEXEC);
+    execvp(exec_args[0], exec_args.data());
+    const int exec_error = errno;
+    report_command_launch_error(expanded[1], exec_error);
+    dup2(saved_stdin, STDIN_FILENO); dup2(saved_stdout, STDOUT_FILENO); dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stdin); close(saved_stdout); close(saved_stderr);
+    restore_environment();
+    return exec_error == ENOENT ? 127 : 126;
   }
 
   // 2. Handle Builtins
@@ -649,9 +689,12 @@ class Parser {
     for (char ch : variable)
       if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_'))
         throw std::runtime_error("for requires a valid variable name");
-    if (!match("in")) throw std::runtime_error("for loops require an explicit in list in this shell");
     std::vector<std::string> values;
-    while (pos < tokens.size() && peek() != ";" && peek() != "do") values.push_back(consume());
+    if (match("in")) {
+      while (pos < tokens.size() && peek() != ";" && peek() != "do") values.push_back(consume());
+    } else {
+      values.push_back("\x02$@\x02");
+    }
     match(";");
     if (!match("do")) throw std::runtime_error("Expected do after for list");
     auto body = parse_list();
@@ -674,8 +717,6 @@ public:
         const size_t count = std::count(tokens[pos].begin(), tokens[pos].end(), marker);
         if (count % 2) throw std::runtime_error(description);
       }
-      if (tokens[pos].find('\x07') != std::string::npos)
-        throw std::runtime_error("Arithmetic expansion is not supported yet");
     }
     pos = 0;
   }
@@ -694,8 +735,6 @@ public:
         throw std::runtime_error("Here-strings are not supported yet");
       if ((t == "<" || t == ">") && pos + 1 < tokens.size() && tokens[pos + 1] == "(")
         throw std::runtime_error("Process substitution is not supported yet");
-      if (t == ">&")
-        throw std::runtime_error("Descriptor duplication redirection is not supported yet");
       if (t == "(")
         throw std::runtime_error("Unsupported compound shell syntax: (");
       if (node->args.empty() && (t == "{" || t == "("))
@@ -715,7 +754,7 @@ public:
           throw std::runtime_error("Invalid here-document body");
         node->redirections.push_back({type, body.substr(1), true, body[0] == '\x04',
                                       tokens[pos - 2].line, tokens[pos - 2].column});
-      } else if (t == "<" || t == ">" || t == ">|" || t == ">>" || t == "2>" || t == "2>>" || t == "&>" || t == "&>>") {
+      } else if (t == "<" || t == ">" || t == ">|" || t == ">>" || t == "2>" || t == "2>>" || t == "&>" || t == "&>>" || t == ">&" || t == "2>&" || t == "<&") {
         std::string type = consume();
         if (pos >= tokens.size()) {
           throw std::runtime_error("Missing filename for redirection");

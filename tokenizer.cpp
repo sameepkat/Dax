@@ -109,7 +109,7 @@ std::vector<ShellToken> tokenize(const std::string &line) {
         emit("!", i);
       } else if (c == '2' && buf.empty() && !token_started && i + 1 < line.size() && line[i + 1] == '>') {
         if (i + 2 < line.size() && line[i + 2] == '&') {
-          emit(">&", i);
+          emit("2>&", i);
           i += 2;
         } else if (i + 2 < line.size() && line[i + 2] == '>') {
           emit("2>>", i);
@@ -140,6 +140,10 @@ std::vector<ShellToken> tokenize(const std::string &line) {
       } else if (c == '}' && parameter_braces > 0) {
         buf += c;
         --parameter_braces;
+      } else if (c == '<' && i + 1 < line.size() && line[i + 1] == '&') {
+        flush_word();
+        emit("<&", i);
+        ++i;
       } else if (c == '>' && i + 1 < line.size() && line[i + 1] == '&') {
         flush_word();
         emit(">&", i);

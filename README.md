@@ -79,17 +79,20 @@ remaining arguments exposed as the global `args` array:
 
 The supported shell syntax includes simple commands, pipelines, `;`, `&`,
 `&&`, `||`, `!`, parenthesized subshells, brace groups, `if`/`elif`/`else`,
-`case`, explicit-list `for` loops, and `while`/`until` loops. Common parameter
-expansion, quote removal, unquoted word splitting using `IFS` (space, tab, and
+`case`, explicit-list `for` loops (and positional-parameter loops without
+`in`), and `while`/`until` loops. Common parameter expansion, including
+`$@`/`$*`, prefix/suffix pattern removal, tilde expansion, integer arithmetic,
+quote removal, unquoted word splitting using `IFS` (space, tab, and
 newline by default), pathname expansion, and
 `$(...)` command substitution are supported. Common unset-only and
 null-or-unset default/assign/alternate/error parameter operators and
 `${#name}` are included. Redirections include
-`<`, `>`, `>>`, `2>`, `2>>`, `&>`, and `&>>`. `<<` and `<<-` here-documents
+`<`, `>`, `>>`, `2>`, `2>>`, `&>`, `&>>`, and standard descriptor duplication
+or closure (`2>&1`, `>&-`, `<&0`). `<<` and `<<-` here-documents
 support quoted delimiters and basic parameter and command substitution.
-Here-strings, descriptor duplication such as `2>&1`, arrays, arithmetic
-expansion, process substitution, and advanced Bash parameter operators are
-not implemented yet.
+Here-strings, arrays, process substitution, and advanced Bash parameter
+operators are not implemented yet. `umask`, `times`, and common `ulimit`
+queries/updates are available as builtins.
 `break` and `continue` work for one loop level. Common `set -e` cases are
 handled, including conditional and logical-list contexts. Unsupported syntax
 such as `[[ ... ]]`, `select`, `coproc`, and the `time` reserved word is
