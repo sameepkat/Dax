@@ -11,18 +11,20 @@ Dax is a custom Unix shell implementation written in C++. It provides a familiar
 - **Piping**: Connect commands using pipes (`|`).
 - **Redirection**: Support for input (`<`), output (`>`), and append (`>>`) redirection.
 - **Command Lists**: Execute multiple commands sequentially using semicolons (`;`).
-- **Shell Variables and Functions**: Basic variable assignment and expansion, aliases, and shell functions with positional parameters and local variables.
+- **Conditional Lists**: Use Bash-style `&&`, `||`, and `!` with short-circuit execution.
+- **Compound Commands**: Brace groups, subshells, conditionals, case statements, and while, until, and for loops.
+- **Shell Variables and Functions**: Basic variable assignment, parameter expansion, unquoted word splitting and globbing, aliases, and shell functions with positional parameters and local variables.
 - **Background Jobs**: Start a command with `&` and manage basic jobs with `jobs`, `fg`, `bg`, and `wait`.
-- **Built-in Commands**:
-  - `cd`: Change directory.
-  - `pwd`: Print working directory.
-  - `echo`: Print arguments to standard output.
-  - `export`: Set environment variables.
-  - `alias` / `unalias`: Create and remove command aliases.
-  - `history`: View command history.
-  - `exit`: Exit the shell.
+- **Built-in Commands**: Navigation and directories (`cd`, `pwd`, `pushd`,
+  `popd`, `dirs`); variables and functions (`export`, `typeset`, `local`,
+  `readonly`, `unset`, `return`, `shift`, `getopts`); command lookup
+  (`command`, `builtin`, `type`, `whence`, `which`, `hash`); scripting and
+  output (`echo`, `printf`, `read`, `test`, `[`, `eval`, `source`, `.`); job
+  control (`jobs`, `fg`, `bg`, `wait`, `disown`, `kill`, `suspend`); aliases,
+  options, traps, loop control, `true`, `false`, and `exit`.
 - **History Management**: Persistent command history saved to `~/.dax_history`. Supports arrow key navigation (via `readline`).
-- **Signal Handling**: Gracefully handles `SIGINT` (Ctrl+C).
+- **Signal Handling**: Handles `SIGINT` (Ctrl+C), shell signal traps, and exit traps.
+- **Janet Scripting**: Run embedded Janet 1.42.1 scripts with Dax state helpers.
 
 ## Installation
 
@@ -50,6 +52,82 @@ Start the shell by running the executable:
 ```bash
 ./dax
 ```
+
+`dax --help` lists the supported startup options, and `dax --version` prints
+the build version (`development` for a local build and the package version for
+release builds). Startup options include `-b`/`--` to stop option parsing and
+the Dax shell options `errexit`, `nounset`, and `allexport` via `-e`/`+e`,
+`-u`/`+u`, `-a`/`+a`, `-o`/`+o`, or their long forms. This option interface is
+a small Dax subset inspired by Zsh; other Zsh options are not accepted.
+
+Run one shell command with Dax's parser, or execute a Janet script with its
+remaining arguments exposed as the global `args` array:
+
+```bash
+./dax -c 'false || echo recovered'
+./dax -e -c 'false' script-name argument
+./dax script.dax argument
+./dax -- script.dax argument
+./dax --script script.dax argument
+./dax --janet automation.janet project-name
+./dax --janet-restricted ./workspace agent.janet task-argument
+```
+
+The supported shell syntax includes simple commands, pipelines, `;`, `&`,
+`&&`, `||`, `!`, parenthesized subshells, brace groups, `if`/`elif`/`else`,
+`case`, explicit-list `for` loops, and `while`/`until` loops. Common parameter
+expansion, quote removal, unquoted word splitting using `IFS` (space, tab, and
+newline by default), pathname expansion, and
+`$(...)` command substitution are supported. Common unset-only and
+null-or-unset default/assign/alternate/error parameter operators and
+`${#name}` are included. Redirections include
+`<`, `>`, `>>`, `2>`, `2>>`, `&>`, and `&>>`. `<<` and `<<-` here-documents
+support quoted delimiters and basic parameter and command substitution.
+Here-strings, descriptor duplication such as `2>&1`, arrays, arithmetic
+expansion, process substitution, and advanced Bash parameter operators are
+not implemented yet.
+`break` and `continue` work for one loop level. Common `set -e` cases are
+handled, including conditional and logical-list contexts. Unsupported syntax
+such as `[[ ... ]]`, `select`, `coproc`, and the `time` reserved word is
+rejected before earlier commands in that input run. Parse and quote errors
+report a line and column.
+`dax -c` uses the same parser and returns the final command status. This is a
+practical subset; it does not claim full Bash compatibility. Dax prints a job
+id and process id when starting a background job, including in `-c` mode.
+In `-c COMMAND [NAME [ARG...]]`, `NAME` becomes `$0` and remaining values are
+the positional parameters; when omitted, `$0` is `dax`. For Dax scripts, `$0`
+is the script path and values after the path become positional parameters.
+`ERR` traps and exact Bash `errexit` behavior in every compound-command context
+are not implemented. `pipefail` is unsupported, so a pipeline's status is its
+last command's status.
+
+Janet startup configuration is read from
+`$XDG_CONFIG_HOME/dax/init.janet`, or `~/.config/dax/init.janet` when
+`XDG_CONFIG_HOME` is unset. Startup errors are reported and Dax continues to
+the interactive prompt. The `dax/cd`, `dax/cwd`, `dax/getenv`,
+`dax/setenv`, and `dax/execute` functions operate against Dax state.
+`dax/execute` accepts an argv array or tuple and an optional table with
+`:cwd`, `:env`, `:timeout-ms`, `:capture-output`, and `:max-output-bytes`. It
+returns a table containing `:stdout`, `:stderr`, `:exit-code`, `:timed-out`,
+and `:truncated`. It never parses the argument vector as shell source.
+`dax/alias`, `dax/set-prompt`, and `(dax/on :startup fn)` support startup
+configuration. Janet's own `os/*` functions remain available to trusted scripts
+and do not share Dax's shell state.
+
+Restricted Janet scripts run with
+`dax --janet-restricted <workspace> <script.janet> [args...]`. This mode is
+Linux-only and fails closed unless Landlock and seccomp restrictions are
+available. Janet `os/*` and `ffi/*` bindings are removed. Scripts use
+`dax/session-create`, `dax/session-execute`, and `dax/session-close`; session
+commands are argv-based, run within the workspace and a private temporary
+directory, have a default 30-second timeout and 1 MiB output cap, and have
+network access disabled by default. `dax/request-approval` validates workspace
+paths in C++ and requests explicit approval. `dax/remove-tree` uses that flow
+and denies requests when paths leave the workspace or no controlling terminal
+is available.
+
+The build embeds the official Janet 1.42.1 amalgamated source under
+`vendor/janet`; a system Janet installation is not needed.
 
 ### Examples
 

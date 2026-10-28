@@ -1,6 +1,7 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
 #include <iostream>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
@@ -11,6 +12,7 @@ void print_vector(const std::vector<std::string> &vector);
 void print_table(const std::unordered_map<std::string, std::string> &);
 
 void print_prompt();
+void report_command_launch_error(const std::string &command, int error);
 
 
 namespace History{

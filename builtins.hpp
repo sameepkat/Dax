@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "tokenizer.hpp"
 
 struct Job {
   int id;
@@ -22,19 +23,34 @@ bool shell_should_exit();
 int requested_exit_status();
 void clear_exit_request();
 void execute_line(const std::string &line);
-std::vector<std::string> tokenize(const std::string &line);
+std::vector<ShellToken> tokenize(const std::string &line);
 void expand_words(std::vector<std::string> &words);
-void expand_aliases(std::vector<std::string> &words);
+void expand_aliases(std::vector<ShellToken> &words);
 void define_function(const std::string &name, const std::string &body);
 bool function_exists(const std::string &name);
 bool shell_should_return();
+void enter_shell_loop();
+void leave_shell_loop();
+bool take_loop_break();
+bool take_loop_continue();
+bool loop_control_pending();
 void run_exit_trap();
 void run_pending_signal_trap();
 bool set_shell_variable(const std::string &name, const std::string &value,
                         bool export_value = false);
 bool shell_variable_readonly(const std::string &name);
+void set_shell_arguments(const std::string &shell_name,
+                         const std::vector<std::string> &arguments);
+bool set_shell_option(const std::string &name, bool enabled);
 void begin_word_expansion();
 bool word_expansion_succeeded();
+bool word_expansion_ran_substitution();
+int word_expansion_substitution_status();
+size_t word_expansion_error_index();
 void apply_errexit(int status);
+void begin_errexit_ignored_context();
+void end_errexit_ignored_context();
+void mark_errexit_immune();
+void clear_errexit_immune();
 
 #endif

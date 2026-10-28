@@ -2,10 +2,10 @@
 pkgname=dax-shell
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="A custom Unix shell written in C++ with support for piping, redirection, history management, and built-in commands."
+pkgdesc="A C++ Unix shell with Bash-style scripting and an embedded Janet runtime"
 arch=('x86_64' 'i686' 'aarch64')
 url="https://github.com/sameepkat/Dax"
-license=('GPL3')
+license=('GPL3' 'MIT')
 depends=('readline')
 makedepends=('git' 'gcc' 'make')
 source=("git+https://github.com/sameepkat/Dax.git#tag=v${pkgver}")
@@ -13,7 +13,7 @@ sha256sums=('SKIP')
 
 build() {
     cd "$srcdir/Dax"
-    make
+    make VERSION="${pkgver}"
 }
 
 package() {

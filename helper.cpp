@@ -1,10 +1,21 @@
 #include "helper.hpp"
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <readline/history.h>
 #include <unistd.h>
 namespace fs = std::filesystem;
+
+void report_command_launch_error(const std::string &command, int error) {
+  if (error == ENOENT) {
+    std::fprintf(stderr, "dax: %s: command not found\n", command.c_str());
+    return;
+  }
+  std::fprintf(stderr, "dax: %s: %s\n", command.c_str(), std::strerror(error));
+}
 
 std::vector<std::string> extract_key_value(const std::string &token) {
   auto pos = token.find('=');

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <glob.h>
 #include <iostream>
 #include <sstream>
 #include <sys/stat.h>
@@ -21,12 +22,20 @@ std::unordered_map<std::string, std::string> aliases, vars, readonly_vars,
 std::unordered_map<std::string, std::string> functions;
 std::unordered_map<int, std::string> traps;
 std::vector<std::string> dirs, positionals;
+std::string shell_name = "dax";
 std::vector<Job> jobs;
 int status_value = 0, exit_value = 0;
 bool exiting = false, errexit = false, nounset = false, allexport = false;
+int errexit_ignored_context = 0;
+bool errexit_immune_status = false;
 bool returning = false;
+int loop_depth = 0;
+bool loop_break = false, loop_continue = false;
+int substitution_status = 0;
+bool substitution_ran = false;
 volatile sig_atomic_t pending_signal = 0;
 bool expansion_error = false;
+size_t expansion_error_index = 0;
 size_t getopts_index = 1, getopts_char = 1;
 struct SavedVar {
   bool had_var;
@@ -113,7 +122,7 @@ int external(const std::vector<std::string> &a, bool foreground = true) {
     return 0;
   auto p = find_command(a[0]);
   if (!p) {
-    std::cerr << a[0] << ": command not found\n";
+    report_command_launch_error(a[0], ENOENT);
     return 127;
   }
   pid_t pid = fork();
@@ -128,7 +137,9 @@ int external(const std::vector<std::string> &a, bool foreground = true) {
       av.push_back(const_cast<char *>(s.c_str()));
     av.push_back(nullptr);
     execv(p->c_str(), av.data());
-    _exit(errno == ENOENT ? 127 : 126);
+    const int exec_error = errno;
+    report_command_launch_error(a[0], exec_error);
+    _exit(exec_error == ENOENT ? 127 : 126);
   }
   if (!foreground) {
     remember_job(pid, join(a, 0));
@@ -351,6 +362,18 @@ std::optional<int> run(const std::vector<std::string> &a) {
       auto result = run(nested);
       return result ? *result : 1;
     }
+    if (c == "command" && a[1] == "-v") {
+      int rc = 0;
+      for (size_t n = 2; n < a.size(); ++n) {
+        if (is_builtin(a[n]) || functions.count(a[n]))
+          std::cout << a[n] << '\n';
+        else if (auto path = find_command(a[n]))
+          std::cout << *path << '\n';
+        else
+          rc = 1;
+      }
+      return rc;
+    }
     int rc = 0;
     for (; i < a.size(); ++i) {
       if (is_builtin(a[i]))
@@ -405,26 +428,43 @@ std::optional<int> run(const std::vector<std::string> &a) {
     return 0;
   }
   if (c == "jobs") {
+    const int current_job = jobs.empty() ? -1 : jobs.back().id;
+    const int previous_job = jobs.size() < 2 ? -1 : jobs[jobs.size() - 2].id;
+    auto marker_for = [&](int id) {
+      return id == current_job ? '+' : id == previous_job ? '-' : ' ';
+    };
     for (auto it = jobs.begin(); it != jobs.end();) {
       int st;
       pid_t r = waitpid(it->pid, &st, WNOHANG | WUNTRACED);
       if (r == it->pid && (WIFEXITED(st) || WIFSIGNALED(st))) {
-        std::cout << '[' << it->id << "] Done " << it->command << '\n';
+        std::cout << '[' << it->id << ']' << marker_for(it->id) << "  Done "
+                  << it->command << '\n';
         it = jobs.erase(it);
       } else {
         if (r == it->pid && WIFSTOPPED(st))
           it->stopped = true;
-        std::cout << '[' << it->id << "] "
+        std::cout << '[' << it->id << ']' << marker_for(it->id) << "  "
                   << (it->stopped ? "Stopped" : "Running") << ' ' << it->command
-                  << '\n';
+                  << " &\n";
         ++it;
       }
     }
     return 0;
   }
   if (c == "fg" || c == "bg" || c == "wait" || c == "disown") {
-    if (jobs.empty())
-      return 1;
+    if (c == "wait" && a.size() == 1) {
+      for (auto it = jobs.begin(); it != jobs.end();) {
+        int status = 0;
+        while (waitpid(it->pid, &status, 0) < 0 && errno == EINTR) {}
+        it = jobs.erase(it);
+      }
+      return 0;
+    }
+    if (jobs.empty()) {
+      const std::string job = a.size() > 1 ? a[1] : "%+";
+      std::cerr << c << ": " << job << ": no such job\n";
+      return c == "wait" ? 127 : 1;
+    }
     int id = jobs.back().id;
     if (a.size() > 1) {
       std::string x = a[1];
@@ -434,8 +474,11 @@ std::optional<int> run(const std::vector<std::string> &a) {
     }
     auto it = std::find_if(jobs.begin(), jobs.end(),
                            [&](auto &j) { return j.id == id; });
-    if (it == jobs.end())
-      return 1;
+    if (it == jobs.end()) {
+      const std::string job = a.size() > 1 ? a[1] : "%+";
+      std::cerr << c << ": " << job << ": no such job\n";
+      return c == "wait" ? 127 : 1;
+    }
     if (c == "disown") {
       jobs.erase(it);
       return 0;
@@ -722,15 +765,10 @@ std::optional<int> run(const std::vector<std::string> &a) {
       perror(a[1].c_str());
       return 1;
     }
-    std::string line;
-    int rc = 0;
-    while (std::getline(f, line)) {
-      execute_line(line);
-      rc = last_status();
-      if (exiting)
-        break;
-    }
-    return rc;
+    std::ostringstream source;
+    source << f.rdbuf();
+    execute_line(source.str());
+    return last_status();
   }
   if (c == "eval") {
     execute_line(join(a));
@@ -749,6 +787,19 @@ std::optional<int> run(const std::vector<std::string> &a) {
     if (n < 0 || (size_t)n > positionals.size())
       return 1;
     positionals.erase(positionals.begin(), positionals.begin() + n);
+    return 0;
+  }
+  if (c == "break" || c == "continue") {
+    if (a.size() > 1 && atoi(a[1].c_str()) != 1) {
+      std::cerr << c << ": only a single loop level is supported\n";
+      return 2;
+    }
+    if (loop_depth == 0) {
+      std::cerr << c << ": can only be used inside a loop\n";
+      return 1;
+    }
+    if (c == "break") loop_break = true;
+    else loop_continue = true;
     return 0;
   }
   if (c == "getopts") {
@@ -802,9 +853,12 @@ std::optional<int> run(const std::vector<std::string> &a) {
     }
     if (a.size() < 3)
       return 2;
-    int sig = a[2] == "EXIT" ? 0 : signal_number(a[2]);
-    if (a[2] == "EXIT")
-      sig = 0;
+    const bool exit_trap = a[2] == "EXIT" || a[2] == "0";
+    int sig = exit_trap ? 0 : signal_number(a[2]);
+    if (!exit_trap && sig == 0) {
+      std::cerr << "trap: " << a[2] << ": unsupported or invalid signal\n";
+      return 1;
+    }
     if (a[1] == "-" || a[1].empty()) {
       traps.erase(sig);
       if (sig > 0)
@@ -857,7 +911,7 @@ bool is_builtin(const std::string &n) {
       "disown",  "kill",     "suspend", "read",   "printf",  "test",
       "[",       "true",     "false",   "set",    "setopt",  "unsetopt",
       "hash",    "source",   ".",       "eval",   "return",  "shift",
-      "getopts", "trap",     "autoload"};
+      "getopts", "trap",     "autoload", "break", "continue"};
   return std::find(names.begin(), names.end(), n) != names.end();
 }
 void remember_job(int pid, const std::string &cmd) {
@@ -870,92 +924,258 @@ int last_status() { return status_value; }
 bool shell_should_exit() { return exiting; }
 int requested_exit_status() { return exit_value; }
 void clear_exit_request() { exiting = false; }
+static std::string run_command_substitution(const std::string &command) {
+  int output_pipe[2];
+  if (pipe(output_pipe) != 0) { substitution_status = 1; substitution_ran = true; return {}; }
+  std::cout.flush();
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(output_pipe[0]); close(output_pipe[1]);
+    substitution_status = 1; substitution_ran = true; return {};
+  }
+  if (pid == 0) {
+    dup2(output_pipe[1], STDOUT_FILENO);
+    close(output_pipe[0]); close(output_pipe[1]);
+    execute_line(command);
+    std::cout.flush(); std::cerr.flush();
+    _exit(last_status() & 255);
+  }
+  close(output_pipe[1]);
+  std::string result;
+  char buffer[4096];
+  ssize_t n;
+  constexpr size_t output_cap = 8 * 1024 * 1024;
+  while ((n = read(output_pipe[0], buffer, sizeof(buffer))) > 0) {
+    size_t room = result.size() < output_cap ? output_cap - result.size() : 0;
+    result.append(buffer, std::min(room, static_cast<size_t>(n)));
+  }
+  close(output_pipe[0]);
+  int status = 1;
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  substitution_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+  substitution_ran = true;
+  while (!result.empty() && result.back() == '\n') result.pop_back();
+  return result;
+}
+
+static size_t command_substitution_end(const std::string &word, size_t dollar) {
+  size_t cursor = dollar + 2;
+  int depth = 1;
+  char quote = 0;
+  for (; cursor < word.size(); ++cursor) {
+    const char ch = word[cursor];
+    if (quote) {
+      if (ch == '\\' && quote == '"' && cursor + 1 < word.size()) { ++cursor; continue; }
+      if (ch == quote) quote = 0;
+      continue;
+    }
+    if (ch == '\'' || ch == '"') { quote = ch; continue; }
+    if (ch == '$' && cursor + 1 < word.size() && word[cursor + 1] == '(') {
+      ++depth; ++cursor; continue;
+    }
+    if (ch == '(') { ++depth; continue; }
+    if (ch == ')' && --depth == 0) return cursor;
+  }
+  return std::string::npos;
+}
+
 void expand_words(std::vector<std::string> &words) {
-  for (auto &w : words) {
-    std::string out;
-    bool literal = false;
+  std::vector<std::string> expanded_words;
+  for (size_t word_index = 0; word_index < words.size(); ++word_index) {
+    const auto &w = words[word_index];
+    auto fail_expansion = [&]() {
+      if (!expansion_error) expansion_error_index = word_index;
+      expansion_error = true;
+    };
+    std::vector<std::string> fields(1), patterns(1);
+    std::vector<bool> has_pattern(1, false);
+    bool literal = false, double_quoted = false, pending_split = false;
+    bool last_ifs_nonwhite = false, last_ifs_whitespace = false;
+    auto append_text = [&](const std::string &text, bool split) {
+      auto ifs_it = vars.find("IFS");
+      const char *environment_ifs = std::getenv("IFS");
+      const std::string ifs = ifs_it != vars.end() ? ifs_it->second
+                              : environment_ifs ? environment_ifs
+                                                : " \t\n";
+      for (unsigned char ch : text) {
+        const bool ifs_delimiter = split && ifs.find(static_cast<char>(ch)) != std::string::npos;
+        if (ifs_delimiter) {
+          const bool ifs_whitespace = ch == ' ' || ch == '\t' || ch == '\n';
+          if (ifs_whitespace) {
+            if (!fields.back().empty()) {
+              fields.emplace_back();
+              patterns.emplace_back();
+              has_pattern.push_back(false);
+            }
+            last_ifs_whitespace = true;
+          } else if (!(last_ifs_nonwhite && last_ifs_whitespace)) {
+            fields.emplace_back();
+            patterns.emplace_back();
+            has_pattern.push_back(false);
+            last_ifs_nonwhite = true;
+            last_ifs_whitespace = false;
+          }
+          if (!ifs_whitespace) last_ifs_nonwhite = true;
+          pending_split = true;
+          continue;
+        }
+        pending_split = false;
+        last_ifs_nonwhite = false;
+        last_ifs_whitespace = false;
+        fields.back() += static_cast<char>(ch);
+        const bool meta = ch == '*' || ch == '?' || ch == '[';
+        if (meta && !literal && !double_quoted) has_pattern.back() = true;
+        if (meta && (literal || double_quoted)) patterns.back() += '\\';
+        patterns.back() += static_cast<char>(ch);
+      }
+    };
     for (size_t i = 0; i < w.size(); ++i) {
-      if (w[i] == '\x01') {
-        literal = !literal;
+      if (w[i] == '\x01') { literal = !literal; continue; }
+      if (w[i] == '\x02') { double_quoted = !double_quoted; continue; }
+      if (w[i] == '\x03') {
+        size_t end = w.find('\x03', i + 1);
+        if (end == std::string::npos) { fail_expansion(); break; }
+        append_text(run_command_substitution(w.substr(i + 1, end - i - 1)), !double_quoted);
+        i = end;
         continue;
       }
       if (literal || w[i] != '$') {
-        out += w[i];
+        append_text(std::string(1, w[i]), false);
+        continue;
+      }
+      if (i + 1 < w.size() && w[i + 1] == '(') {
+        const size_t end = command_substitution_end(w, i);
+        if (end == std::string::npos) { fail_expansion(); break; }
+        append_text(run_command_substitution(w.substr(i + 2, end - i - 2)), !double_quoted);
+        i = end;
         continue;
       }
       if (i + 1 < w.size() && w[i + 1] == '$') {
-        out += std::to_string(getpid());
-        ++i;
-        continue;
+        append_text(std::to_string(getpid()), !double_quoted); ++i; continue;
       }
       if (i + 1 < w.size() && w[i + 1] == '?') {
-        out += std::to_string(status_value);
-        ++i;
-        continue;
+        append_text(std::to_string(status_value), !double_quoted); ++i; continue;
       }
       if (i + 1 < w.size() && w[i + 1] == '#') {
-        out += std::to_string(positionals.size());
-        ++i;
-        continue;
+        append_text(std::to_string(positionals.size()), !double_quoted); ++i; continue;
       }
       if (i + 1 < w.size() && (w[i + 1] == '@' || w[i + 1] == '*')) {
         for (size_t j = 0; j < positionals.size(); ++j) {
-          if (j)
-            out += ' ';
-          out += positionals[j];
+          if (j && !double_quoted) append_text(" ", true);
+          append_text(positionals[j], !double_quoted);
         }
-        ++i;
-        continue;
+        ++i; continue;
       }
       size_t b = i + 1, e = b;
+      std::string parameter_operator, parameter_word;
+      std::string parameter_name;
+      bool length_expansion = false;
       if (b < w.size() && w[b] == '{') {
-        b++;
-        e = w.find('}', b);
-        if (e == std::string::npos) {
-          out += '$';
-          continue;
+        b++; e = w.find('}', b);
+        if (e == std::string::npos) { append_text("$", false); continue; }
+        std::string expression = w.substr(b, e - b);
+        if (!expression.empty() && expression[0] == '#') {
+          length_expansion = true;
+          expression.erase(expression.begin());
+        } else {
+          for (const std::string op : {":-", ":=", ":+", ":?"}) {
+            size_t at = expression.find(op);
+            if (at != std::string::npos) {
+              parameter_operator = op;
+              parameter_word = expression.substr(at + op.size());
+              expression.resize(at);
+              break;
+            }
+          }
+          if (parameter_operator.empty()) {
+            for (const std::string op : {"-", "=", "+", "?"}) {
+              size_t at = expression.find(op);
+              if (at != std::string::npos) {
+                parameter_operator = op;
+                parameter_word = expression.substr(at + op.size());
+                expression.resize(at);
+                break;
+              }
+            }
+          }
         }
+        parameter_name = expression;
         i = e;
       } else if (b < w.size() && std::isdigit((unsigned char)w[b])) {
-        e = b + 1;
-        i = e - 1;
+        e = b + 1; i = e - 1;
       } else {
-        while (e < w.size() &&
-               (std::isalnum((unsigned char)w[e]) || w[e] == '_'))
-          ++e;
-        if (e == b) {
-          out += '$';
-          continue;
-        }
+        while (e < w.size() && (std::isalnum((unsigned char)w[e]) || w[e] == '_')) ++e;
+        if (e == b) { append_text("$", false); continue; }
         i = e - 1;
       }
-      std::string k = w.substr(b, e - b);
+      std::string k = parameter_name.empty() ? w.substr(b, e - b) : parameter_name;
+      if (k == "0") {
+        append_text(shell_name, !double_quoted);
+        continue;
+      }
       if (k.size() == 1 && std::isdigit((unsigned char)k[0])) {
         size_t n = k[0] - '1';
-        if (n < positionals.size())
-          out += positionals[n];
+        if (n < positionals.size()) append_text(positionals[n], !double_quoted);
         continue;
       }
       auto it = vars.find(k);
       const char *v = getenv(k.c_str());
-      if (it != vars.end())
-        out += it->second;
-      else if (v)
-        out += v;
+      const bool is_set = it != vars.end() || v != nullptr;
+      std::string value = it != vars.end() ? it->second : (v ? v : "");
+      if (length_expansion) {
+        append_text(std::to_string(value.size()), !double_quoted);
+      } else if (!parameter_operator.empty()) {
+        const bool colon_operator = parameter_operator[0] == ':';
+        const bool condition = colon_operator ? (!is_set || value.empty()) : !is_set;
+        const char op = parameter_operator.back();
+        if (op == '-' && condition) append_text(parameter_word, !double_quoted);
+        else if (op == '=' && condition) {
+          if (set_shell_variable(k, parameter_word)) append_text(parameter_word, !double_quoted);
+          else fail_expansion();
+        } else if (op == '+' && !condition) append_text(parameter_word, !double_quoted);
+        else if (op == '?' && condition) {
+          std::cerr << "dax: " << k << ": " << (parameter_word.empty() ? "parameter null or not set" : parameter_word) << '\n';
+          fail_expansion();
+        } else if (is_set) append_text(value, !double_quoted);
+      } else if (is_set) append_text(value, !double_quoted);
       else if (nounset) {
         std::cerr << "dax: " << k << ": unset variable\n";
-        expansion_error = true;
+        fail_expansion();
       }
     }
-    w = out;
+    if (pending_split && fields.size() > 1 && fields.back().empty()) {
+      fields.pop_back(); patterns.pop_back(); has_pattern.pop_back();
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+      if (!has_pattern[i]) { expanded_words.push_back(fields[i]); continue; }
+      glob_t matches{};
+      int rc = glob(patterns[i].c_str(), 0, nullptr, &matches);
+      if (rc == 0 && matches.gl_pathc) {
+        for (size_t j = 0; j < matches.gl_pathc; ++j) expanded_words.emplace_back(matches.gl_pathv[j]);
+      } else {
+        expanded_words.push_back(fields[i]);
+      }
+      globfree(&matches);
+    }
   }
+  words = std::move(expanded_words);
 }
-void expand_aliases(std::vector<std::string> &words) {
+void expand_aliases(std::vector<ShellToken> &words) {
   for (int i = 0; i < 10 && !words.empty(); ++i) {
     auto it = aliases.find(words[0]);
     if (it == aliases.end())
       break;
+    const size_t call_line = words[0].line;
+    const size_t call_column = words[0].column;
+    const size_t call_begin = words[0].source_begin;
+    const size_t call_end = words[0].source_end;
     auto replacement = tokenize(it->second);
+    for (auto &token : replacement) {
+      token.line = call_line;
+      token.column = call_column;
+      token.source_begin = call_begin;
+      token.source_end = call_end;
+    }
     replacement.insert(replacement.end(), words.begin() + 1, words.end());
     words = std::move(replacement);
   }
@@ -968,10 +1188,18 @@ bool function_exists(const std::string &name) {
   return functions.count(name) != 0;
 }
 bool shell_should_return() { return returning; }
+void enter_shell_loop() { ++loop_depth; }
+void leave_shell_loop() { if (loop_depth > 0) --loop_depth; }
+bool take_loop_break() { bool result = loop_break; loop_break = false; return result; }
+bool take_loop_continue() { bool result = loop_continue; loop_continue = false; return result; }
+bool loop_control_pending() { return loop_break || loop_continue; }
 void run_exit_trap() {
   auto it = traps.find(0);
-  if (it != traps.end())
+  if (it != traps.end()) {
+    const int saved_status = last_status();
     execute_line(it->second);
+    set_last_status(saved_status);
+  }
 }
 void run_pending_signal_trap() {
   int sig = pending_signal;
@@ -994,14 +1222,43 @@ bool set_shell_variable(const std::string &name, const std::string &value,
     return setenv(name.c_str(), value.c_str(), 1) == 0;
   return true;
 }
+void set_shell_arguments(const std::string &name,
+                         const std::vector<std::string> &arguments) {
+  shell_name = name;
+  positionals = arguments;
+  getopts_index = 1;
+  getopts_char = 1;
+}
+bool set_shell_option(const std::string &name, bool enabled) {
+  if (name == "errexit" || name == "ERR_EXIT")
+    errexit = enabled;
+  else if (name == "nounset" || name == "NO_UNSET")
+    nounset = enabled;
+  else if (name == "allexport" || name == "ALL_EXPORT")
+    allexport = enabled;
+  else
+    return false;
+  return true;
+}
 bool shell_variable_readonly(const std::string &name) {
   return readonly_vars.count(name) != 0;
 }
-void begin_word_expansion() { expansion_error = false; }
+void begin_word_expansion() { expansion_error = false; expansion_error_index = 0; substitution_status = 0; substitution_ran = false; }
 bool word_expansion_succeeded() { return !expansion_error; }
+bool word_expansion_ran_substitution() { return substitution_ran; }
+int word_expansion_substitution_status() { return substitution_status; }
+size_t word_expansion_error_index() { return expansion_error_index; }
 void apply_errexit(int status) {
+  if (status != 0 && errexit_immune_status) return;
+  if (errexit_ignored_context > 0) return;
   if (errexit && status != 0) {
     exiting = true;
     exit_value = status & 255;
   }
 }
+void begin_errexit_ignored_context() { ++errexit_ignored_context; }
+void end_errexit_ignored_context() {
+  if (errexit_ignored_context > 0) --errexit_ignored_context;
+}
+void mark_errexit_immune() { errexit_immune_status = true; }
+void clear_errexit_immune() { errexit_immune_status = false; }
