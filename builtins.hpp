@@ -19,7 +19,8 @@ bool is_builtin(const std::string &name);
 bool shell_command_resolves(const std::string &name);
 std::vector<std::string> shell_completion_candidates(const std::string &prefix,
                                                      bool command_position,
-                                                     bool variable_name);
+                                                     bool variable_name,
+                                                     const std::string &directory_prefix = {});
 void remember_job(int pid, const std::string &command);
 void set_last_status(int status);
 int last_status();

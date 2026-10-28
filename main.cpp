@@ -47,12 +47,22 @@ char **dax_attempted_completion(const char *text, int start, int) {
       [](unsigned char ch) { return std::isspace(ch); });
   bool variable_name = !word.empty() && word[0] == '$';
   std::string candidate_prefix = variable_name ? word.substr(1) : word;
-  completion_items = shell_completion_candidates(candidate_prefix, command_position, variable_name);
+  std::string directory_prefix;
+  if (!command_position && !variable_name) {
+    size_t token_start = before.find_last_of(" \t\n;|&");
+    const std::string preceding_token = token_start == std::string::npos
+        ? before : before.substr(token_start + 1);
+    if (preceding_token.find('/') != std::string::npos)
+      directory_prefix = preceding_token.substr(0, preceding_token.find_last_of('/') + 1);
+  }
+  completion_items = shell_completion_candidates(candidate_prefix, command_position,
+                                                  variable_name, directory_prefix);
   if (variable_name)
     for (auto &candidate : completion_items) candidate.insert(candidate.begin(), '$');
   if (!completion_items.empty()) {
     rl_attempted_completion_over = 1;
-    rl_completion_append_character = ' ';
+    rl_completion_append_character = completion_items.size() == 1 &&
+        (completion_items.front().empty() || completion_items.front().back() != '/') ? ' ' : '\0';
     return rl_completion_matches(word.c_str(), completion_generator);
   }
   if (variable_name) {
@@ -292,6 +302,9 @@ void configure_interactive_readline() {
   std::setlocale(LC_CTYPE, "");
   rl_attempted_completion_function = dax_attempted_completion;
   rl_redisplay_function = dax_redisplay;
+  // GNU Readline's menu completion inserts the next candidate on each Tab
+  // press instead of printing the full candidate list.
+  rl_bind_key('\t', rl_menu_complete);
   rl_bind_keyseq("\e[C", accept_suggestion);
   rl_bind_keyseq("\eOC", accept_suggestion);
   rl_bind_keyseq("\e[F", accept_suggestion);

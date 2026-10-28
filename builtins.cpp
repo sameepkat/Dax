@@ -1088,7 +1088,8 @@ bool shell_command_resolves(const std::string &name) {
 }
 std::vector<std::string> shell_completion_candidates(const std::string &prefix,
                                                      bool command_position,
-                                                     bool variable_name) {
+                                                     bool variable_name,
+                                                     const std::string &directory_prefix) {
   std::vector<std::string> result;
   auto add = [&](const std::string &candidate) {
     if (candidate.rfind(prefix, 0) == 0 &&
@@ -1129,6 +1130,27 @@ std::vector<std::string> shell_completion_candidates(const std::string &prefix,
         const std::string name = it->path().filename().string();
         if (name.rfind(prefix, 0) == 0 && access(it->path().c_str(), X_OK) == 0) add(name);
       }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+  if (!variable_name) {
+    std::filesystem::path directory = directory_prefix.empty()
+        ? std::filesystem::path(".") : std::filesystem::path(directory_prefix);
+    if (!directory_prefix.empty() && directory_prefix[0] == '~') {
+      if (const char *home = std::getenv("HOME"))
+        directory = std::filesystem::path(std::string(home) + directory_prefix.substr(1));
+    }
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(directory, error), end;
+         !error && it != end; it.increment(error)) {
+      const std::string name = it->path().filename().string();
+      if (prefix.empty() && !name.empty() && name.front() == '.') continue;
+      if (name.rfind(prefix, 0) != 0) continue;
+      std::string candidate = name;
+      std::error_code type_error;
+      if (it->is_directory(type_error) && !type_error) candidate.push_back('/');
+      add(candidate);
     }
     std::sort(result.begin(), result.end());
     return result;
