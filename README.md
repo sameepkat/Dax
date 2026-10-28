@@ -6,11 +6,13 @@ Dax is a custom Unix shell implementation written in C++. It provides a familiar
 
 ## Features
 
-- **Custom Prompt**: Displays the current directory in green, with `~` expansion for the home directory.
+- **Custom Prompt**: Displays the current directory name in green.
 - **Command Execution**: Run standard Linux commands (e.g., `ls`, `grep`, `vim`).
 - **Piping**: Connect commands using pipes (`|`).
 - **Redirection**: Support for input (`<`), output (`>`), and append (`>>`) redirection.
 - **Command Lists**: Execute multiple commands sequentially using semicolons (`;`).
+- **Shell Variables and Functions**: Basic variable assignment and expansion, aliases, and shell functions with positional parameters and local variables.
+- **Background Jobs**: Start a command with `&` and manage basic jobs with `jobs`, `fg`, `bg`, and `wait`.
 - **Built-in Commands**:
   - `cd`: Change directory.
   - `pwd`: Print working directory.
@@ -39,14 +41,14 @@ Dax is a custom Unix shell implementation written in C++. It provides a familiar
    make
    ```
 
-   This will create an executable named `main`.
+   This will create an executable named `dax`.
 
 ## Usage
 
 Start the shell by running the executable:
 
 ```bash
-./main
+./dax
 ```
 
 ### Examples

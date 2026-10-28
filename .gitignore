@@ -2,3 +2,5 @@ build/
 main
 *.txt
 dax
+docs/
+tests/
