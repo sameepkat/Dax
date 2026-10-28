@@ -1083,7 +1083,7 @@ bool is_builtin(const std::string &n) {
   return std::find(names.begin(), names.end(), n) != names.end();
 }
 bool shell_command_resolves(const std::string &name) {
-  return is_builtin(name) || aliases.count(name) != 0 || functions.count(name) != 0 ||
+  return is_builtin(name) || aliases.count(name) != 0 || functions.count(name) != 0 || janet_command_exists(name) ||
          find_command(name).has_value();
 }
 std::vector<std::string> shell_completion_candidates(const std::string &prefix,
@@ -1117,6 +1117,7 @@ std::vector<std::string> shell_completion_candidates(const std::string &prefix,
     for (const auto &name : builtins) add(name);
     for (const auto &[name, value] : aliases) { (void)value; add(name); }
     for (const auto &[name, body] : functions) { (void)body; add(name); }
+    for (const auto &name : janet_command_names()) add(name);
     const char *path = std::getenv("PATH");
     std::stringstream directories(path ? path : "");
     std::string directory;

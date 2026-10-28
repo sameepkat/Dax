@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <optional>
 
 bool janet_runtime_start();
 int janet_run_file(const std::string &path, const std::vector<std::string> &args);
@@ -15,5 +16,8 @@ int janet_run_startup_hook();
 const std::string &janet_prompt();
 const std::string &janet_colorscheme();
 bool janet_git_branch_enabled();
+bool janet_command_exists(const std::string &name);
+std::vector<std::string> janet_command_names();
+std::optional<int> janet_dispatch_command(const std::vector<std::string> &args);
 
 #endif

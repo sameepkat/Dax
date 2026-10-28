@@ -1,6 +1,7 @@
 #include "parser.hpp"
 #include "builtins.hpp"
 #include "helper.hpp"
+#include "janet_runtime.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -247,6 +248,21 @@ int CommandNode::execute() {
       restore_environment();
       return *status;
     }
+
+  if (!expanded.empty()) {
+    if (auto status = janet_dispatch_command(expanded)) {
+      std::cout.flush();
+      std::cerr.flush();
+      dup2(saved_stdin, STDIN_FILENO);
+      dup2(saved_stdout, STDOUT_FILENO);
+      dup2(saved_stderr, STDERR_FILENO);
+      close(saved_stdin);
+      close(saved_stdout);
+      close(saved_stderr);
+      restore_environment();
+      return *status;
+    }
+  }
 
   if (expanded.empty()) {
     std::cout.flush();

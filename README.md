@@ -134,6 +134,12 @@ and `:truncated`. It never parses the argument vector as shell source.
 configuration. Choose `"dax"`, `"high-contrast"`, or `"no-color"` with
 `(dax/set-colorscheme "dax")`; `NO_COLOR` disables Dax theme colors. Janet's own `os/*` functions remain available to trusted scripts
 and do not share Dax's shell state.
+Register a Janet function as an interactive shell command with
+`(dax/register-command "name" function)`. Dax passes each command-line argument
+as a string argument to the function; an integer return value becomes the
+command's exit status. Use `(dax/unregister-command "name")` to remove one.
+For example, after defining a Janet function named `z`, add
+`(dax/register-command "z" z)` to make `z projects` invoke it.
 
 Restricted Janet scripts run with
 `dax --janet-restricted <workspace> <script.janet> [args...]`. This mode is

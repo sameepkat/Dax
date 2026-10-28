@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <unordered_map>
 #include <csignal>
@@ -34,6 +35,7 @@ std::string colorscheme_override = "dax";
 bool git_branch_enabled = true;
 struct AgentSession { std::string workspace; std::string temporary; int timeout_ms; bool network; size_t output_limit; };
 std::unordered_map<int32_t, AgentSession> sessions;
+std::unordered_map<std::string, Janet> registered_commands;
 int32_t next_session_id = 1;
 bool restricted_mode = false;
 std::string restricted_root, restricted_temp;
@@ -317,6 +319,30 @@ Janet c_set_git_branch(int32_t argc, Janet *argv) {
     janet_panic("set-git-branch expects a boolean");
   git_branch_enabled = janet_unwrap_boolean(argv[0]);
   return janet_wrap_boolean(git_branch_enabled);
+}
+
+Janet c_register_command(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 2);
+  const char *name = janet_getcstring(argv, 0);
+  if (!name || !*name || !janet_checktype(argv[1], JANET_FUNCTION))
+    janet_panic("register-command expects a command name and function");
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(name); *p; ++p)
+    if (!(std::isalnum(*p) || *p == '_' || *p == '-' || *p == '.'))
+      janet_panic("command name may contain only letters, digits, _, -, and .");
+  registered_commands[name] = argv[1];
+  const std::string root_name = "dax/command-" + std::string(name);
+  janet_table_put(environment, janet_csymbolv(root_name.c_str()), argv[1]);
+  return janet_wrap_true();
+}
+
+Janet c_unregister_command(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 1);
+  const char *name = janet_getcstring(argv, 0);
+  if (!name) janet_panic("unregister-command expects a command name string");
+  const bool removed = registered_commands.erase(name) != 0;
+  const std::string root_name = "dax/command-" + std::string(name);
+  janet_table_remove(environment, janet_csymbolv(root_name.c_str()));
+  return janet_wrap_boolean(removed);
 }
 
 Janet c_on(int32_t argc, Janet *argv) {
@@ -714,6 +740,8 @@ const JanetReg dax_functions[] = {
     {"set-prompt", c_set_prompt, "Set the interactive Dax prompt."},
     {"set-colorscheme", c_set_colorscheme, "Select Dax's interactive color scheme."},
     {"set-git-branch", c_set_git_branch, "Show or hide the Git branch in the interactive prompt."},
+    {"register-command", c_register_command, "Register a Janet function as an interactive Dax command."},
+    {"unregister-command", c_unregister_command, "Remove a registered Janet command."},
     {"on", c_on, "Register a Dax lifecycle callback."},
     {"cwd", c_cwd, "Return Dax's current working directory."},
     {"getenv", c_getenv, "Read an environment variable."},
@@ -749,6 +777,7 @@ bool janet_runtime_start() {
   prompt_override.clear();
   colorscheme_override = "dax";
   git_branch_enabled = true;
+  registered_commands.clear();
   return environment != nullptr;
 }
 
@@ -818,7 +847,7 @@ int janet_run_restricted_file(const std::string &path, const std::string &worksp
       remove_keys.push_back(key);
   }
   for (Janet key : remove_keys) janet_table_remove(environment, key);
-  for (const char *name : {"dax/alias", "dax/set-prompt", "dax/set-colorscheme", "dax/set-git-branch", "dax/on", "dax/cd",
+  for (const char *name : {"dax/alias", "dax/set-prompt", "dax/set-colorscheme", "dax/set-git-branch", "dax/register-command", "dax/unregister-command", "dax/on", "dax/cd",
                            "dax/getenv", "dax/setenv", "dax/execute"})
     janet_table_remove(environment, janet_csymbolv(name));
 
@@ -856,6 +885,31 @@ int janet_run_startup_hook() {
 const std::string &janet_prompt() { return prompt_override; }
 const std::string &janet_colorscheme() { return colorscheme_override; }
 bool janet_git_branch_enabled() { return git_branch_enabled; }
+bool janet_command_exists(const std::string &name) { return registered_commands.count(name) != 0; }
+std::vector<std::string> janet_command_names() {
+  std::vector<std::string> names;
+  names.reserve(registered_commands.size());
+  for (const auto &entry : registered_commands) names.push_back(entry.first);
+  return names;
+}
+std::optional<int> janet_dispatch_command(const std::vector<std::string> &args) {
+  if (args.empty()) return {};
+  auto it = registered_commands.find(args[0]);
+  if (it == registered_commands.end()) return {};
+  std::vector<Janet> values;
+  values.reserve(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i)
+    values.push_back(janet_cstringv(args[i].c_str()));
+  Janet result;
+  const JanetSignal signal = janet_pcall(janet_unwrap_function(it->second),
+                                         static_cast<int32_t>(values.size()),
+                                         values.data(), &result, nullptr);
+  if (signal != JANET_SIGNAL_OK) {
+    std::fprintf(stderr, "dax: Janet command %s failed: %s\n", args[0].c_str(), janet_to_string(result));
+    return 1;
+  }
+  return janet_checkint(result) ? static_cast<int>(janet_unwrap_integer(result) & 255) : 0;
+}
 
 void janet_runtime_stop() {
   if (!environment) return;
