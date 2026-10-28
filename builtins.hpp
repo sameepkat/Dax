@@ -42,6 +42,15 @@ bool shell_variable_readonly(const std::string &name);
 void set_shell_arguments(const std::string &shell_name,
                          const std::vector<std::string> &arguments);
 bool set_shell_option(const std::string &name, bool enabled);
+bool shell_option_enabled(const std::string &name);
+void set_shell_modes(bool login, bool interactive, bool monitor_was_explicit);
+bool shell_noexec_enabled();
+bool shell_verbose_enabled();
+bool shell_xtrace_enabled();
+bool shell_noglob_enabled();
+bool shell_noclobber_enabled();
+void trace_shell_command(const std::vector<std::string> &args);
+std::vector<std::string> take_completed_job_notifications();
 void begin_word_expansion();
 bool word_expansion_succeeded();
 bool word_expansion_ran_substitution();

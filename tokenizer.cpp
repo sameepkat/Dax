@@ -144,6 +144,10 @@ std::vector<ShellToken> tokenize(const std::string &line) {
         flush_word();
         emit(">&", i);
         ++i;
+      } else if (c == '>' && i + 1 < line.size() && line[i + 1] == '|') {
+        flush_word();
+        emit(">|", i);
+        ++i;
       } else if (c == '|' || c == ';' || c == '&' || c == '<' || c == '>' ||
                  c == '{' || c == '}' || c == '(' || c == ')') {
         flush_word();

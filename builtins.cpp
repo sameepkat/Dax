@@ -26,6 +26,9 @@ std::string shell_name = "dax";
 std::vector<Job> jobs;
 int status_value = 0, exit_value = 0;
 bool exiting = false, errexit = false, nounset = false, allexport = false;
+bool notify_jobs = false, noclobber = false, noglob = false, monitor = false;
+bool noexec = false, verbose = false, xtrace = false;
+bool login_shell = false, interactive_shell = false;
 int errexit_ignored_context = 0;
 bool errexit_immune_status = false;
 bool returning = false;
@@ -489,13 +492,13 @@ std::optional<int> run(const std::vector<std::string> &a) {
       return 0;
     }
     if (c == "fg") {
-      if (isatty(STDIN_FILENO))
+      if (monitor && isatty(STDIN_FILENO))
         tcsetpgrp(STDIN_FILENO, it->pid);
       kill(-it->pid, SIGCONT);
     }
     int st = 0;
     waitpid(it->pid, &st, c == "fg" ? WUNTRACED : 0);
-    if (c == "fg" && isatty(STDIN_FILENO))
+    if (c == "fg" && monitor && isatty(STDIN_FILENO))
       tcsetpgrp(STDIN_FILENO, getpgrp());
     if (WIFSTOPPED(st))
       it->stopped = true;
@@ -682,53 +685,64 @@ std::optional<int> run(const std::vector<std::string> &a) {
     return eval(eval, 1, end);
   }
   if (c == "set" || c == "setopt" || c == "unsetopt") {
+    static const std::vector<std::string> shell_options = {
+        "allexport", "notify", "noclobber", "errexit", "noglob",
+        "monitor", "noexec", "nounset", "verbose", "xtrace"};
     if ((c == "setopt" || c == "unsetopt") && a.size() == 1) {
-      for (auto name : {"errexit", "nounset", "allexport"})
+      for (const auto &name : shell_options)
         std::cout << name << '\t'
-                  << ((std::string(name) == "errexit" && errexit) ||
-                              (std::string(name) == "nounset" && nounset) ||
-                              (std::string(name) == "allexport" && allexport)
-                          ? "on"
-                          : "off")
+                  << (shell_option_enabled(name) ? "on" : "off")
                   << '\n';
       return 0;
     }
-    if (c == "set" && a.size() == 2 && a[1] == "-o") {
-      for (auto name : {"errexit", "nounset", "allexport"})
+    if (c == "set" && (a.size() == 2 && (a[1] == "-o" || a[1] == "+o"))) {
+      for (const auto &name : shell_options)
         std::cout << name << '\t'
-                  << ((std::string(name) == "errexit" && errexit) ||
-                              (std::string(name) == "nounset" && nounset) ||
-                              (std::string(name) == "allexport" && allexport)
-                          ? "on"
-                          : "off")
+                  << (shell_option_enabled(name) ? "on" : "off")
                   << '\n';
       return 0;
     }
     for (size_t i = 1; i < a.size(); ++i) {
       auto x = a[i];
       bool on = c != "unsetopt";
-      if (x == "-e" || x == "errexit" || x == "ERR_EXIT")
-        errexit = on;
-      else if (x == "+e")
-        errexit = false;
-      else if (x == "-u" || x == "nounset" || x == "NO_UNSET")
-        nounset = on;
-      else if (x == "+u")
-        nounset = false;
-      else if (x == "-a" || x == "allexport" || x == "ALL_EXPORT")
-        allexport = on;
-      else if (x == "+a")
-        allexport = false;
-      else if (c == "set" && x == "--") {
+      if (c == "set" && x == "--") {
         positionals.assign(a.begin() + i + 1, a.end());
         break;
       } else if (c == "set" && x.find('=') != std::string::npos) {
         if (!setvar(x))
           return 1;
-      } else if (c == "set" && i == 1) {
-        for (auto &[k, v] : vars)
-          std::cout << k << '=' << v << '\n';
-      } else if (x != "-o") {
+      } else if (x == "-o" || x == "+o") {
+        if (i + 1 >= a.size()) {
+          for (const auto &name : shell_options)
+            std::cout << name << '\t'
+                      << (shell_option_enabled(name) ? "on" : "off") << '\n';
+          break;
+        }
+        if (!set_shell_option(a[++i], x == "-o")) {
+          std::cerr << c << ": unsupported option: " << a[i] << '\n';
+          return 2;
+        }
+      } else if ((x.size() > 1 && (x[0] == '-' || x[0] == '+')) && c == "set") {
+        on = x[0] == '-';
+        for (size_t j = 1; j < x.size(); ++j) {
+          const char flag = x[j];
+          const std::string name = flag == 'a' ? "allexport"
+                                   : flag == 'b' ? "notify"
+                                   : flag == 'C' ? "noclobber"
+                                   : flag == 'e' ? "errexit"
+                                   : flag == 'f' ? "noglob"
+                                   : flag == 'm' ? "monitor"
+                                   : flag == 'n' ? "noexec"
+                                   : flag == 'u' ? "nounset"
+                                   : flag == 'v' ? "verbose"
+                                   : flag == 'x' ? "xtrace" : "";
+          if (name.empty()) {
+            std::cerr << c << ": unsupported option: " << flag << '\n';
+            return 2;
+          }
+          set_shell_option(name, on);
+        }
+      } else if (!set_shell_option(x, on)) {
         std::cerr << c << ": unsupported option: " << x << '\n';
         return 2;
       }
@@ -918,6 +932,22 @@ void remember_job(int pid, const std::string &cmd) {
   int id = jobs.empty() ? 1 : jobs.back().id + 1;
   jobs.push_back({id, pid, cmd, false});
   std::cout << '[' << id << "] " << pid << '\n';
+}
+std::vector<std::string> take_completed_job_notifications() {
+  std::vector<std::string> notifications;
+  if (!notify_jobs) return notifications;
+  for (auto it = jobs.begin(); it != jobs.end();) {
+    int status = 0;
+    const pid_t result = waitpid(it->pid, &status, WNOHANG);
+    if (result == it->pid && (WIFEXITED(status) || WIFSIGNALED(status))) {
+      notifications.push_back("[" + std::to_string(it->id) + "]  Done " +
+                              it->command);
+      it = jobs.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return notifications;
 }
 void set_last_status(int s) { status_value = s; }
 int last_status() { return status_value; }
@@ -1148,6 +1178,10 @@ void expand_words(std::vector<std::string> &words) {
     }
     for (size_t i = 0; i < fields.size(); ++i) {
       if (!has_pattern[i]) { expanded_words.push_back(fields[i]); continue; }
+      if (noglob) {
+        expanded_words.push_back(fields[i]);
+        continue;
+      }
       glob_t matches{};
       int rc = glob(patterns[i].c_str(), 0, nullptr, &matches);
       if (rc == 0 && matches.gl_pathc) {
@@ -1236,9 +1270,56 @@ bool set_shell_option(const std::string &name, bool enabled) {
     nounset = enabled;
   else if (name == "allexport" || name == "ALL_EXPORT")
     allexport = enabled;
+  else if (name == "notify" || name == "notify_jobs")
+    notify_jobs = enabled;
+  else if (name == "noclobber")
+    noclobber = enabled;
+  else if (name == "noglob")
+    noglob = enabled;
+  else if (name == "monitor")
+    monitor = enabled;
+  else if (name == "noexec")
+    noexec = enabled;
+  else if (name == "verbose")
+    verbose = enabled;
+  else if (name == "xtrace")
+    xtrace = enabled;
   else
     return false;
   return true;
+}
+bool shell_option_enabled(const std::string &name) {
+  if (name == "errexit" || name == "ERR_EXIT") return errexit;
+  if (name == "nounset" || name == "NO_UNSET") return nounset;
+  if (name == "allexport" || name == "ALL_EXPORT") return allexport;
+  if (name == "notify" || name == "notify_jobs") return notify_jobs;
+  if (name == "noclobber") return noclobber;
+  if (name == "noglob") return noglob;
+  if (name == "monitor") return monitor;
+  if (name == "noexec") return noexec;
+  if (name == "verbose") return verbose;
+  if (name == "xtrace") return xtrace;
+  return false;
+}
+void set_shell_modes(bool login, bool interactive, bool monitor_was_explicit) {
+  login_shell = login;
+  interactive_shell = interactive;
+  if (!monitor_was_explicit) monitor = interactive;
+}
+bool shell_noexec_enabled() { return noexec; }
+bool shell_verbose_enabled() { return verbose; }
+bool shell_xtrace_enabled() { return xtrace; }
+bool shell_noglob_enabled() { return noglob; }
+bool shell_noclobber_enabled() { return noclobber; }
+void trace_shell_command(const std::vector<std::string> &args) {
+  if (!xtrace) return;
+  const char *prefix = getenv("PS4");
+  std::cerr << (prefix ? prefix : "+ ");
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (i) std::cerr << ' ';
+    std::cerr << args[i];
+  }
+  std::cerr << '\n';
 }
 bool shell_variable_readonly(const std::string &name) {
   return readonly_vars.count(name) != 0;

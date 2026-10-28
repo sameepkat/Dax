@@ -46,6 +46,7 @@ int CommandNode::execute() {
                 << arg_locations[index].second << ": word expansion failed\n";
     return 1;
   }
+  trace_shell_command(expanded);
   size_t assignment_count = 0;
   while (assignment_count < expanded.size() &&
          expanded[assignment_count].find('=') != std::string::npos)
@@ -145,10 +146,16 @@ int CommandNode::execute() {
       }
       dup2(fd, STDIN_FILENO);
       close(fd);
-    } else if (red.type == ">" || red.type == "2>" || red.type == "&>") {
-      fd = open(filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    } else if (red.type == ">" || red.type == ">|" || red.type == "2>" || red.type == "&>") {
+      const int create_flags = O_WRONLY | O_CREAT | O_TRUNC |
+                               (red.type != ">|" && shell_noclobber_enabled()
+                                    ? O_EXCL : 0);
+      fd = open(filename.c_str(), create_flags, 0644);
       if (fd < 0) {
-        perror("open output");
+        if (errno == EEXIST && shell_noclobber_enabled())
+          std::cerr << "dax: cannot overwrite existing file: " << filename << '\n';
+        else
+          perror("open output");
         dup2(saved_stdin, STDIN_FILENO);
         dup2(saved_stdout, STDOUT_FILENO);
         dup2(saved_stderr, STDERR_FILENO);
@@ -326,7 +333,8 @@ int ListNode::execute() {
   run_pending_signal_trap();
   set_last_status(status);
   apply_errexit(status);
-  if (right && !shell_should_exit() && !shell_should_return() && !loop_control_pending()) {
+  if (right && !shell_noexec_enabled() && !shell_should_exit() &&
+      !shell_should_return() && !loop_control_pending()) {
     clear_errexit_immune();
     status = right->execute();
   }
@@ -346,7 +354,8 @@ int AndOrNode::execute() {
   int status = left ? left->execute() : 0;
   end_errexit_ignored_context();
   set_last_status(status);
-  if ((and_mode && status == 0) || (!and_mode && status != 0)) {
+  if (!shell_noexec_enabled() &&
+      ((and_mode && status == 0) || (!and_mode && status != 0))) {
     clear_errexit_immune();
     status = right ? right->execute() : 2;
   } else if (status != 0) {
@@ -412,6 +421,7 @@ int IfNode::execute() {
     const int condition_status = branch.first ? branch.first->execute() : 0;
     end_errexit_ignored_context();
     set_last_status(condition_status);
+    if (shell_noexec_enabled()) return condition_status;
     if (condition_status == 0) {
       int status = branch.second ? branch.second->execute() : 0;
       set_last_status(status);
@@ -437,11 +447,13 @@ int LoopNode::execute() {
     int condition_status = condition ? condition->execute() : 0;
     end_errexit_ignored_context();
     set_last_status(condition_status);
+    if (shell_noexec_enabled()) { status = condition_status; break; }
     if (take_loop_break()) break;
     if (take_loop_continue()) continue;
     if (until ? condition_status == 0 : condition_status != 0) break;
     status = body ? body->execute() : 0;
     set_last_status(status);
+    if (shell_noexec_enabled()) break;
     if (take_loop_break()) break;
     if (take_loop_continue()) continue;
   }
@@ -466,6 +478,7 @@ int ForNode::execute() {
     if (!set_shell_variable(variable, value)) return 1;
     status = body ? body->execute() : 0;
     set_last_status(status);
+    if (shell_noexec_enabled()) break;
     if (take_loop_break()) break;
     if (take_loop_continue()) continue;
   }
@@ -702,7 +715,7 @@ public:
           throw std::runtime_error("Invalid here-document body");
         node->redirections.push_back({type, body.substr(1), true, body[0] == '\x04',
                                       tokens[pos - 2].line, tokens[pos - 2].column});
-      } else if (t == "<" || t == ">" || t == ">>" || t == "2>" || t == "2>>" || t == "&>" || t == "&>>") {
+      } else if (t == "<" || t == ">" || t == ">|" || t == ">>" || t == "2>" || t == "2>>" || t == "&>" || t == "&>>") {
         std::string type = consume();
         if (pos >= tokens.size()) {
           throw std::runtime_error("Missing filename for redirection");

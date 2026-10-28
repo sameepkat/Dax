@@ -55,10 +55,12 @@ Start the shell by running the executable:
 
 `dax --help` lists the supported startup options, and `dax --version` prints
 the build version (`development` for a local build and the package version for
-release builds). Startup options include `-b`/`--` to stop option parsing and
-the Dax shell options `errexit`, `nounset`, and `allexport` via `-e`/`+e`,
-`-u`/`+u`, `-a`/`+a`, `-o`/`+o`, or their long forms. This option interface is
-a small Dax subset inspired by Zsh; other Zsh options are not accepted.
+release builds). Dax follows POSIX-style invocation modes and supports the
+standard shell flags `-a`, `-b`, `-C`, `-e`, `-f`, `-i`, `-m`, `-n`, `-s`,
+`-u`, `-v`, and `-x`, including `+` forms for disabling shell options.
+`-l` is also accepted as a login-shell flag for Termux. `--` terminates startup
+option parsing. This covers invocation and these option behaviors; it does not
+claim full POSIX shell-language conformance.
 
 Run one shell command with Dax's parser, or execute a Janet script with its
 remaining arguments exposed as the global `args` array:
@@ -66,6 +68,8 @@ remaining arguments exposed as the global `args` array:
 ```bash
 ./dax -c 'false || echo recovered'
 ./dax -e -c 'false' script-name argument
+./dax -l
+./dax -s first-argument < commands.dax
 ./dax script.dax argument
 ./dax -- script.dax argument
 ./dax --script script.dax argument
@@ -91,6 +95,13 @@ handled, including conditional and logical-list contexts. Unsupported syntax
 such as `[[ ... ]]`, `select`, `coproc`, and the `time` reserved word is
 rejected before earlier commands in that input run. Parse and quote errors
 report a line and column.
+With no command or script operand, Dax reads commands from standard input and
+starts interactively only when stdin and stderr are terminals; `-i` forces an
+interactive session. `-s` explicitly selects stdin input, while `-l` marks a
+login-shell invocation. Interactive startup reads the optional Janet
+configuration at `$XDG_CONFIG_HOME/dax/init.janet` or
+`~/.config/dax/init.janet`; Dax does not create this file.
+
 `dax -c` uses the same parser and returns the final command status. This is a
 practical subset; it does not claim full Bash compatibility. Dax prints a job
 id and process id when starting a background job, including in `-c` mode.

@@ -18,6 +18,11 @@
 #include <vector>
 
 void execute_line(const std::string &line) {
+  if (shell_verbose_enabled()) {
+    std::istringstream input(line);
+    std::string source_line;
+    while (std::getline(input, source_line)) std::cerr << source_line << '\n';
+  }
   auto tokens = tokenize(line);
   if (tokens.empty())
     return;
@@ -29,7 +34,8 @@ void execute_line(const std::string &line) {
       if (tokens[i] == "}") {
         if (!pending_body_source.empty()) pending_body_source += '\n';
         pending_body_source += line.substr(0, tokens[i].source_begin);
-        define_function(pending_name, pending_body_source);
+        if (!shell_noexec_enabled())
+          define_function(pending_name, pending_body_source);
         pending_name.clear();
         pending_body_source.clear();
         function_end = i + 1;
@@ -88,7 +94,8 @@ void execute_line(const std::string &line) {
         body += tokens[j];
       }
     }
-    define_function(tokens[name_index], body);
+    if (!shell_noexec_enabled())
+      define_function(tokens[name_index], body);
     tokens.erase(tokens.begin() + i, tokens.begin() + close + 1);
     while (i < tokens.size() && tokens[i] == ";") tokens.erase(tokens.begin() + i);
   }
@@ -96,7 +103,7 @@ void execute_line(const std::string &line) {
   expand_aliases(tokens);
   try {
     auto ast = parse(tokens, line);
-    const int status = ast ? ast->execute() : 0;
+    const int status = shell_noexec_enabled() ? 0 : (ast ? ast->execute() : 0);
     set_last_status(status);
     apply_errexit(status);
     clear_errexit_immune();
@@ -137,13 +144,17 @@ static bool shell_input_incomplete(const std::string &source) {
          missing_heredoc || open_operator;
 }
 
-enum class CliMode { Interactive, Command, Script, Janet, RestrictedJanet };
+enum class CliMode { Interactive, Command, Script, Stdin, Janet, RestrictedJanet };
 
 struct CliInvocation {
   CliMode mode = CliMode::Interactive;
   bool show_help = false;
   bool show_version = false;
   bool shell_option_seen = false;
+  bool login = false;
+  bool force_interactive = false;
+  bool has_operands = false;
+  bool monitor_option_seen = false;
   std::string command;
   std::string shell_name = "dax";
   std::string script_path;
@@ -154,22 +165,27 @@ struct CliInvocation {
 static void print_usage(std::ostream &out) {
   out << "Usage: dax [options] [script [args...]]\n"
          "       dax [options] -c COMMAND [NAME [ARG...]]\n"
+         "       dax [options] -s [ARG...]\n"
          "       dax --script FILE [ARG...]\n"
          "       dax --janet FILE [ARG...]\n"
          "       dax --janet-restricted WORKSPACE FILE [ARG...]\n\n"
          "Options:\n"
          "  --help, --version       Show help or version and exit\n"
-         "  -b, --                  Stop processing startup options\n"
+         "  --                      Stop processing startup options\n"
+         "  -l                      Start as a login shell (Termux extension)\n"
+         "  -i                      Force interactive mode\n"
+         "  -s                      Read shell commands from standard input\n"
          "  -c COMMAND             Run one Dax shell command\n"
          "  -o OPTION              Enable a shell option; -o no_OPTION disables it\n"
          "  --OPTION, --no-OPTION  Enable or disable a shell option\n"
          "  +o OPTION              Disable a shell option; +o no_OPTION enables it\n"
          "  +-OPTION, +-no-OPTION  Disable or enable a shell option\n"
-         "  -e/+e                  Enable/disable errexit\n"
-         "  -u/+u                  Enable/disable nounset\n"
-         "  -a/+a                  Enable/disable allexport\n\n"
-         "Named shell options: errexit, nounset, allexport\n"
-         "This is a Dax-supported subset, not the full Zsh option set.\n";
+         "  -a/-b/-C/-e/-f/-m/-n/-u/-v/-x and + forms\n"
+         "                         POSIX shell option flags\n"
+         "Named options: allexport, notify, noclobber, errexit, noglob,\n"
+         "               monitor, noexec, nounset, verbose, xtrace\n\n"
+         "Dax supports POSIX-style invocation and these options; this does not\n"
+         "claim full POSIX shell-language conformance.\n";
 }
 
 static bool apply_named_cli_option(const std::string &name, bool enabled,
@@ -182,20 +198,36 @@ static bool apply_named_cli_option(const std::string &name, bool enabled,
   return true;
 }
 
-static bool apply_cli_option_argument(std::string name, bool default_enabled,
-                                      bool &option_seen, std::string &error) {
-  bool enabled = default_enabled;
-  if (name.rfind("no_", 0) == 0 || name.rfind("no-", 0) == 0) {
-    name.erase(0, 3);
-    enabled = !enabled;
-  }
-  return apply_named_cli_option(name, enabled, option_seen, error);
-}
-
 static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
                       std::string &error) {
   size_t i = 1;
   bool stop_options = false;
+  auto set_flag = [&](char flag, bool enabled) {
+    const std::string name = flag == 'a' ? "allexport"
+                             : flag == 'b' ? "notify"
+                             : flag == 'C' ? "noclobber"
+                             : flag == 'e' ? "errexit"
+                             : flag == 'f' ? "noglob"
+                             : flag == 'm' ? "monitor"
+                             : flag == 'n' ? "noexec"
+                             : flag == 'u' ? "nounset"
+                             : flag == 'v' ? "verbose"
+                             : flag == 'x' ? "xtrace" : "";
+    if (name.empty()) return false;
+    if (flag == 'm') invocation.monitor_option_seen = true;
+    return apply_named_cli_option(name, enabled,
+                                  invocation.shell_option_seen, error);
+  };
+  auto set_named_flag = [&](std::string name, bool default_enabled) {
+    bool enabled = default_enabled;
+    if (name.rfind("no_", 0) == 0 || name.rfind("no-", 0) == 0) {
+      name.erase(0, 3);
+      enabled = !enabled;
+    }
+    if (name == "monitor") invocation.monitor_option_seen = true;
+    return apply_named_cli_option(name, enabled,
+                                  invocation.shell_option_seen, error);
+  };
   while (i < static_cast<size_t>(argc)) {
     const std::string arg = argv[i];
     if (!stop_options && arg == "--help") {
@@ -206,21 +238,8 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
       invocation.show_version = true;
       return true;
     }
-    if (!stop_options && (arg == "-b" || arg == "--")) {
+    if (!stop_options && arg == "--") {
       stop_options = true;
-      ++i;
-      continue;
-    }
-    if (!stop_options && (arg == "-o" || arg == "+o")) {
-      const bool default_enabled = arg == "-o";
-      if (i + 1 >= static_cast<size_t>(argc)) {
-        error = arg + " requires an option name";
-        return false;
-      }
-      ++i;
-      if (!apply_cli_option_argument(argv[i], default_enabled,
-                                     invocation.shell_option_seen, error))
-        return false;
       ++i;
       continue;
     }
@@ -246,54 +265,99 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
       ++i;
       for (; i < static_cast<size_t>(argc); ++i)
         invocation.arguments.emplace_back(argv[i]);
+      invocation.has_operands = !invocation.arguments.empty();
       return true;
     }
+    if (!stop_options && (arg == "-o" || arg == "+o")) {
+      const bool default_enabled = arg == "-o";
+      if (++i >= static_cast<size_t>(argc)) {
+        error = arg + " requires an option name";
+        return false;
+      }
+      if (!set_named_flag(argv[i], default_enabled)) return false;
+      ++i;
+      continue;
+    }
     if (!stop_options && arg.rfind("+-", 0) == 0) {
-      if (!apply_cli_option_argument(arg.substr(2), false,
-                                     invocation.shell_option_seen, error))
+      if (!set_named_flag(arg.substr(2), false))
         return false;
       ++i;
       continue;
     }
     if (!stop_options && arg.rfind("--no-", 0) == 0) {
-      if (!apply_named_cli_option(arg.substr(5), false,
-                                  invocation.shell_option_seen, error))
+      if (!set_named_flag(arg.substr(5), false))
         return false;
       ++i;
       continue;
     }
     if (!stop_options && arg.rfind("--", 0) == 0) {
-      if (!apply_named_cli_option(arg.substr(2), true,
-                                  invocation.shell_option_seen, error))
+      if (!set_named_flag(arg.substr(2), true))
         return false;
       ++i;
       continue;
     }
-    if (!stop_options && (arg == "-e" || arg == "-u" || arg == "-a" ||
-                          arg == "+e" || arg == "+u" || arg == "+a")) {
+    if (!stop_options && arg.size() > 1 &&
+        (arg[0] == '-' || arg[0] == '+')) {
       const bool enabled = arg[0] == '-';
-      const std::string name = arg.back() == 'e' ? "errexit"
-                               : arg.back() == 'u' ? "nounset" : "allexport";
-      if (!apply_named_cli_option(name, enabled,
-                                  invocation.shell_option_seen, error))
-        return false;
+      for (size_t j = 1; j < arg.size(); ++j) {
+        const char flag = arg[j];
+        if (flag == 'o') {
+          std::string option_name;
+          if (j + 1 < arg.size()) {
+            option_name = arg.substr(j + 1);
+            j = arg.size();
+          } else if (i + 1 < static_cast<size_t>(argc)) {
+            option_name = argv[++i];
+          } else {
+            error = std::string(1, arg[0]) + "o requires an option name";
+            return false;
+          }
+          if (!set_named_flag(option_name, enabled)) return false;
+          break;
+        }
+        if (flag == 'c' && enabled) {
+          std::string command;
+          if (j + 1 < arg.size()) command = arg.substr(j + 1);
+          else if (i + 1 < static_cast<size_t>(argc)) command = argv[++i];
+          else {
+            error = "-c requires a command string";
+            return false;
+          }
+          invocation.mode = CliMode::Command;
+          invocation.command = std::move(command);
+          invocation.has_operands = true;
+          ++i;
+          if (i < static_cast<size_t>(argc)) {
+            invocation.shell_name = argv[i++];
+            for (; i < static_cast<size_t>(argc); ++i)
+              invocation.arguments.emplace_back(argv[i]);
+            invocation.has_operands = true;
+          }
+          return true;
+        }
+        if (flag == 'i' && enabled) {
+          invocation.force_interactive = true;
+          continue;
+        }
+        if (flag == 'l' && enabled) {
+          invocation.login = true;
+          continue;
+        }
+        if (flag == 's' && enabled) {
+          invocation.mode = CliMode::Stdin;
+          ++i;
+          for (; i < static_cast<size_t>(argc); ++i)
+            invocation.arguments.emplace_back(argv[i]);
+          invocation.has_operands = !invocation.arguments.empty();
+          return true;
+        }
+        if (!set_flag(flag, enabled)) {
+          error = "invalid option: " + arg;
+          return false;
+        }
+      }
       ++i;
       continue;
-    }
-    if (!stop_options && arg == "-c") {
-      if (i + 1 >= static_cast<size_t>(argc)) {
-        error = "-c requires a command string";
-        return false;
-      }
-      invocation.mode = CliMode::Command;
-      invocation.command = argv[++i];
-      ++i;
-      if (i < static_cast<size_t>(argc)) {
-        invocation.shell_name = argv[i++];
-        for (; i < static_cast<size_t>(argc); ++i)
-          invocation.arguments.emplace_back(argv[i]);
-      }
-      return true;
     }
     if (!stop_options && !arg.empty() && arg[0] == '-') {
       error = "invalid option: " + arg;
@@ -307,12 +371,66 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
     invocation.mode = CliMode::Script;
     invocation.script_path = arg;
     invocation.shell_name = arg;
+    invocation.has_operands = true;
     ++i;
     for (; i < static_cast<size_t>(argc); ++i)
       invocation.arguments.emplace_back(argv[i]);
     return true;
   }
   return true;
+}
+
+static bool start_interactive_runtime() {
+  if (!janet_runtime_start()) return false;
+  const char *config_root = std::getenv("XDG_CONFIG_HOME");
+  std::string init_path;
+  if (config_root && *config_root)
+    init_path = std::string(config_root) + "/dax/init.janet";
+  else if (const char *home = std::getenv("HOME"))
+    init_path = std::string(home) + "/.config/dax/init.janet";
+  if (!init_path.empty()) {
+    std::ifstream init(init_path);
+    if (init) {
+      std::vector<std::string> no_args;
+      janet_run_file(init_path, no_args);
+      janet_run_startup_hook();
+    }
+  }
+  return true;
+}
+
+static void print_job_notifications(bool redraw_line = false) {
+  const auto notifications = take_completed_job_notifications();
+  if (notifications.empty()) return;
+  if (redraw_line) rl_crlf();
+  for (const auto &notification : notifications)
+    std::cout << notification << '\n';
+  std::cout.flush();
+  if (redraw_line) {
+    rl_on_new_line();
+    rl_redisplay();
+  }
+}
+
+static int readline_job_event() {
+  print_job_notifications(true);
+  return 0;
+}
+
+static void run_stdin_commands(std::istream &input) {
+  std::string source_line;
+  std::string command_buffer;
+  while (std::getline(input, source_line)) {
+    if (!command_buffer.empty()) command_buffer += '\n';
+    command_buffer += source_line;
+    if (shell_input_incomplete(command_buffer)) continue;
+    execute_line(command_buffer);
+    print_job_notifications();
+    command_buffer.clear();
+    if (shell_should_exit()) break;
+  }
+  if (!command_buffer.empty() && !shell_should_exit())
+    execute_line(command_buffer);
 }
 
 int main(int argc, char **argv) {
@@ -331,22 +449,65 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (invocation.mode == CliMode::Command) {
+  const bool dax_invocation = invocation.mode != CliMode::Janet &&
+                              invocation.mode != CliMode::RestrictedJanet;
+  const bool stdin_requested = invocation.mode == CliMode::Stdin;
+  const bool terminal_default =
+      (invocation.mode == CliMode::Interactive ||
+       invocation.mode == CliMode::Stdin) && !invocation.has_operands &&
+      isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+  const bool interactive = dax_invocation &&
+      (invocation.force_interactive || terminal_default);
+  if ((invocation.mode == CliMode::Interactive ||
+       invocation.mode == CliMode::Stdin) && !interactive)
+    invocation.mode = CliMode::Stdin;
+  else if (invocation.mode == CliMode::Stdin && interactive)
+    invocation.mode = CliMode::Interactive;
+  set_shell_modes(invocation.login, interactive,
+                  invocation.monitor_option_seen);
+
+  if (invocation.mode == CliMode::Command)
     set_shell_arguments(invocation.shell_name, invocation.arguments);
+  else if (invocation.mode == CliMode::Script)
+    set_shell_arguments(invocation.script_path, invocation.arguments);
+  else if (invocation.mode == CliMode::Stdin)
+    set_shell_arguments(argc > 0 ? argv[0] : "dax", invocation.arguments);
+  else if (invocation.mode == CliMode::Interactive)
+    set_shell_arguments(argc > 0 ? argv[0] : "dax",
+                        stdin_requested ? invocation.arguments
+                                        : std::vector<std::string>{});
+
+  bool janet_started = false;
+  if (interactive) {
+    if (!start_interactive_runtime()) return 1;
+    janet_started = true;
+  }
+
+  if (invocation.mode == CliMode::Command) {
     execute_line(invocation.command);
+    print_job_notifications();
     run_exit_trap();
+    if (janet_started) janet_runtime_stop();
     return shell_should_exit() ? requested_exit_status() : last_status();
   }
   if (invocation.mode == CliMode::Script) {
-    set_shell_arguments(invocation.script_path, invocation.arguments);
     std::ifstream script(invocation.script_path);
     if (!script) {
       std::cerr << "dax: cannot open script: " << invocation.script_path << "\n";
+      if (janet_started) janet_runtime_stop();
       return 127;
     }
     std::ostringstream source;
     source << script.rdbuf();
     execute_line(source.str());
+    print_job_notifications();
+    run_exit_trap();
+    if (janet_started) janet_runtime_stop();
+    return shell_should_exit() ? requested_exit_status() : last_status();
+  }
+  if (invocation.mode == CliMode::Stdin) {
+    run_stdin_commands(std::cin);
+    print_job_notifications();
     run_exit_trap();
     return shell_should_exit() ? requested_exit_status() : last_status();
   }
@@ -360,25 +521,8 @@ int main(int argc, char **argv) {
     return janet_run_restricted_file(invocation.script_path, invocation.workspace,
                                      invocation.arguments);
 
-  set_shell_arguments(argc > 0 ? argv[0] : "dax", {});
   std::string line;
   std::string command_buffer;
-
-  if (!janet_runtime_start()) return 1;
-  const char *config_root = std::getenv("XDG_CONFIG_HOME");
-  std::string init_path;
-  if (config_root && *config_root)
-    init_path = std::string(config_root) + "/dax/init.janet";
-  else if (const char *home = std::getenv("HOME"))
-    init_path = std::string(home) + "/.config/dax/init.janet";
-  if (!init_path.empty()) {
-    std::ifstream init(init_path);
-    if (init) {
-      std::vector<std::string> no_args;
-      janet_run_file(init_path, no_args);
-      janet_run_startup_hook();
-    }
-  }
 
   // Load history from file on startup
   History::load_from_file();
@@ -393,6 +537,7 @@ int main(int argc, char **argv) {
   }
 
   setup_signals();
+  rl_event_hook = readline_job_event;
 
   while (true) {
     char cwd[1024];
@@ -449,6 +594,7 @@ int main(int argc, char **argv) {
     command_buffer += line;
     if (shell_input_incomplete(command_buffer)) continue;
     execute_line(command_buffer);
+    print_job_notifications();
     command_buffer.clear();
     if (shell_should_exit())
       break;
@@ -468,6 +614,7 @@ int main(int argc, char **argv) {
   History::save_to_file();
 
   janet_runtime_stop();
+  rl_event_hook = nullptr;
 
   return shell_should_exit() ? requested_exit_status() : last_status();
 }
