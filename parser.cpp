@@ -1,5 +1,7 @@
 #include "parser.hpp"
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <stdexcept>
 
 class Parser {
@@ -110,6 +112,42 @@ class Parser {
     return std::make_unique<ForNode>(variable, std::move(values), std::move(body));
   }
 
+  std::unique_ptr<ASTNode> parse_array_assignment() {
+    if (pos + 1 >= tokens.size()) return nullptr;
+    const std::string lhs = peek();
+    const size_t append_at = lhs.find("+=");
+    const size_t equal_at = append_at == std::string::npos ? lhs.find('=') : append_at;
+    if (equal_at == std::string::npos || tokens[pos + 1] != "(") return nullptr;
+    auto node = std::make_unique<ArrayAssignmentNode>();
+    node->append = append_at != std::string::npos;
+    std::string variable = lhs.substr(0, equal_at);
+    if (!variable.empty() && variable.back() == ']') {
+      const size_t bracket = variable.find('[');
+      if (bracket == std::string::npos || bracket == 0)
+        throw std::runtime_error("Invalid indexed array assignment");
+      const std::string index = variable.substr(bracket + 1, variable.size() - bracket - 2);
+      if (index.empty()) throw std::runtime_error("Array index cannot be empty");
+      char *end = nullptr;
+      unsigned long parsed = std::strtoul(index.c_str(), &end, 10);
+      if (end == index.c_str() || *end || parsed > 1000000)
+        throw std::runtime_error("Array index must be an integer from 0 to 1000000");
+      node->name = variable.substr(0, bracket);
+      node->index = static_cast<size_t>(parsed);
+      node->indexed = true;
+    } else {
+      node->name = std::move(variable);
+    }
+    if (node->name.empty() || !(std::isalpha(static_cast<unsigned char>(node->name[0])) || node->name[0] == '_'))
+      throw std::runtime_error("Invalid array name");
+    for (char ch : node->name)
+      if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_'))
+        throw std::runtime_error("Invalid array name");
+    pos += 2;
+    while (pos < tokens.size() && peek() != ")") node->values.push_back(consume());
+    if (!match(")")) throw std::runtime_error("Missing ) in array assignment");
+    return node;
+  }
+
 public:
   Parser(const std::vector<ShellToken> &t, const std::string &input)
       : tokens(t), source(input) {}
@@ -139,9 +177,16 @@ public:
           (t == "then" || t == "elif" || t == "else" || t == "fi" ||
            t == "do" || t == "done" || t == "in" || t == "esac");
       if (reserved_terminator) break;
-      if (t == "<<<")
-        throw std::runtime_error("Here-strings are not supported yet");
-      if ((t == "<" || t == ">") && pos + 1 < tokens.size() && tokens[pos + 1] == "(")
+      if (t == "<<<") {
+        const auto op = consume();
+        if (pos >= tokens.size() || peek() == ";" || peek() == "|" ||
+            peek() == "&&" || peek() == "||")
+          throw std::runtime_error("Missing word after here-string operator");
+        const auto &target = tokens[pos];
+        node->redirections.push_back({op, consume(), true, true,
+                                      target.line, target.column, true});
+        continue;
+      } else if ((t == "<" || t == ">") && pos + 1 < tokens.size() && tokens[pos + 1] == "(")
         throw std::runtime_error("Process substitution is not supported yet");
       if (t == "(")
         throw std::runtime_error("Unsupported compound shell syntax: (");
@@ -185,6 +230,7 @@ public:
     bool negate = false;
     while (match("!")) negate = !negate;
     auto parse_unit = [&]() -> std::unique_ptr<ASTNode> {
+      if (auto array_assignment = parse_array_assignment()) return array_assignment;
       if (peek() == "if") return parse_if();
       if (peek() == "case") return parse_case();
       if (peek() == "for") return parse_for();

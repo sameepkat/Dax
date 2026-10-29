@@ -9,7 +9,7 @@ std::optional<int> run_options_builtin(const std::vector<std::string> &a,
   const auto &c = a[0];
   if (c == "set" || c == "setopt" || c == "unsetopt") {
     static const std::vector<std::string> shell_options = {
-        "allexport", "notify", "noclobber", "errexit", "noglob",
+        "allexport", "notify", "noclobber", "errexit", "pipefail", "noglob",
         "monitor", "noexec", "nounset", "verbose", "xtrace"};
     if ((c == "setopt" || c == "unsetopt") && a.size() == 1) {
       for (const auto &name : shell_options)
@@ -53,6 +53,7 @@ std::optional<int> run_options_builtin(const std::vector<std::string> &a,
                                    : flag == 'b' ? "notify"
                                    : flag == 'C' ? "noclobber"
                                    : flag == 'e' ? "errexit"
+                                   : flag == 'o' ? "pipefail"
                                    : flag == 'f' ? "noglob"
                                    : flag == 'm' ? "monitor"
                                    : flag == 'n' ? "noexec"

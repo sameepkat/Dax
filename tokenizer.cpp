@@ -79,6 +79,35 @@ std::vector<ShellToken> tokenize(const std::string &line) {
     }
     token_started = true;
   };
+  auto read_process_substitution = [&](size_t &index, char direction) {
+    const size_t content_start = index + 2;
+    size_t end = content_start;
+    int depth = 1;
+    char quote = 0;
+    for (; end < line.size(); ++end) {
+      const char ch = line[end];
+      if (quote) {
+        if (ch == '\\' && quote == '"' && end + 1 < line.size()) { ++end; continue; }
+        if (ch == quote) quote = 0;
+        continue;
+      }
+      if (ch == '\'' || ch == '"') { quote = ch; continue; }
+      if (ch == '(') ++depth;
+      else if (ch == ')' && --depth == 0) break;
+    }
+    buf += '\x08';
+    buf += direction;
+    buf += '\x03';
+    if (end < line.size()) {
+      buf.append(line, content_start, end - content_start);
+      buf += '\x03';
+      index = end;
+    } else {
+      buf.append(line, content_start, std::string::npos);
+      index = line.size() - 1;
+    }
+    token_started = true;
+  };
 
   for (size_t i = 0; i < line.size(); ++i) {
     current_offset = i;
@@ -102,6 +131,8 @@ std::vector<ShellToken> tokenize(const std::string &line) {
       } else if (c == '$' && i + 1 < line.size() && line[i + 1] == '(') {
         if (i + 2 < line.size() && line[i + 2] == '(') buf += '\x07';
         read_command_substitution(i);
+      } else if ((c == '<' || c == '>') && i + 1 < line.size() && line[i + 1] == '(') {
+        read_process_substitution(i, c);
       } else if (c == '!' && buf.empty() &&
                  (i + 1 == line.size() || std::isspace(static_cast<unsigned char>(line[i + 1]) ) ||
                   line[i + 1] == '|' || line[i + 1] == '&' || line[i + 1] == ';')) {
@@ -123,16 +154,18 @@ std::vector<ShellToken> tokenize(const std::string &line) {
         if (i + 2 < line.size() && line[i + 2] == '<') {
           emit("<<<", i);
           i += 2;
+          strip_here_tabs = false;
         } else if (i + 2 < line.size() && line[i + 2] == '-') {
           emit("<<-", i);
           strip_here_tabs = true;
           i += 2;
+          expecting_here_delimiter = true;
         } else {
           emit("<<", i);
           strip_here_tabs = false;
           ++i;
+          expecting_here_delimiter = true;
         }
-        expecting_here_delimiter = true;
       } else if (c == '{' && !buf.empty() && buf.back() == '$') {
         buf += c;
         ++parameter_braces;
@@ -236,6 +269,8 @@ std::vector<ShellToken> tokenize(const std::string &line) {
         if (i + 2 < line.size() && line[i + 2] == '(') buf += '\x07';
         word_quoted = word_quoted || state == IN_DOUBLE;
         read_command_substitution(i);
+      } else if ((c == '<' || c == '>') && i + 1 < line.size() && line[i + 1] == '(') {
+        read_process_substitution(i, c);
       } else if (c == '"') {
         buf += '\x02';
         state = NORMAL;

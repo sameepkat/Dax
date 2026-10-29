@@ -62,6 +62,7 @@ auto &returning = state.returning;
 auto &loop_depth = state.loop_depth;
 auto &loop_break = state.loop_break;
 auto &loop_continue = state.loop_continue;
+auto &loop_control_levels = state.loop_control_levels;
 auto &substitution_status = state.substitution_status;
 auto &substitution_ran = state.substitution_ran;
 auto &pending_signal = state.pending_signal;
@@ -70,6 +71,7 @@ auto &expansion_error_index = state.expansion_error_index;
 auto &getopts_index = state.getopts_index;
 auto &getopts_char = state.getopts_char;
 auto &local_scopes = state.local_scopes;
+std::vector<std::pair<int, pid_t>> process_substitutions;
 
 bool name_ok(const std::string &s) {
   return !s.empty() && (std::isalpha((unsigned char)s[0]) || s[0] == '_') &&
@@ -301,14 +303,26 @@ std::optional<int> run(const std::vector<std::string> &a) {
     return 0;
   }
   if (c == "break" || c == "continue") {
-    if (a.size() > 1 && atoi(a[1].c_str()) != 1) {
-      std::cerr << c << ": only a single loop level is supported\n";
-      return 2;
-    }
     if (loop_depth == 0) {
       std::cerr << c << ": can only be used inside a loop\n";
       return 1;
     }
+    if (a.size() > 2) {
+      std::cerr << c << ": too many arguments\n";
+      return 2;
+    }
+    unsigned levels = 1;
+    if (a.size() == 2) {
+      char *end = nullptr;
+      errno = 0;
+      const unsigned long parsed = std::strtoul(a[1].c_str(), &end, 10);
+      if (errno || end == a[1].c_str() || *end || parsed == 0 || parsed > static_cast<unsigned long>(loop_depth)) {
+        std::cerr << c << ": loop count out of range\n";
+        return 2;
+      }
+      levels = static_cast<unsigned>(parsed);
+    }
+    loop_control_levels = levels;
     if (c == "break") loop_break = true;
     else loop_continue = true;
     return 0;
@@ -359,14 +373,15 @@ std::optional<int> run(const std::vector<std::string> &a) {
   if (c == "trap") {
     if (a.size() == 1) {
       for (auto &[s, v] : traps)
-        std::cout << s << ' ' << v << '\n';
+        std::cout << (s == -1 ? "ERR" : s == 0 ? "EXIT" : std::to_string(s)) << ' ' << v << '\n';
       return 0;
     }
     if (a.size() < 3)
       return 2;
     const bool exit_trap = a[2] == "EXIT" || a[2] == "0";
-    int sig = exit_trap ? 0 : signal_number(a[2]);
-    if (!exit_trap && sig == 0) {
+    const bool err_trap = a[2] == "ERR";
+    int sig = exit_trap ? 0 : err_trap ? -1 : signal_number(a[2]);
+    if (!exit_trap && !err_trap && sig == 0) {
       std::cerr << "trap: " << a[2] << ": unsupported or invalid signal\n";
       return 1;
     }
@@ -547,6 +562,10 @@ static std::string run_command_substitution(const std::string &command) {
     substitution_status = 1; substitution_ran = true; return {};
   }
   if (pid == 0) {
+    state.err_trap_suppressed = true;
+    signal(SIGINT, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+    signal(SIGPIPE, SIG_DFL);
     dup2(output_pipe[1], STDOUT_FILENO);
     close(output_pipe[0]); close(output_pipe[1]);
     execute_line(command);
@@ -569,6 +588,59 @@ static std::string run_command_substitution(const std::string &command) {
   substitution_ran = true;
   while (!result.empty() && result.back() == '\n') result.pop_back();
   return result;
+}
+
+static std::string run_process_substitution(const std::string &command,
+                                            char direction) {
+  int descriptors[2];
+  if (pipe(descriptors) != 0) {
+    std::perror("dax: process substitution pipe");
+    expansion_error = true;
+    return {};
+  }
+  const pid_t child = fork();
+  if (child < 0) {
+    std::perror("dax: process substitution fork");
+    close(descriptors[0]); close(descriptors[1]);
+    expansion_error = true;
+    return {};
+  }
+  if (child == 0) {
+    state.err_trap_suppressed = true;
+    signal(SIGINT, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+    signal(SIGPIPE, SIG_DFL);
+    for (const auto &[fd, pid] : process_substitutions) { (void)pid; close(fd); }
+    const int source = direction == '<' ? descriptors[1] : descriptors[0];
+    const int destination = direction == '<' ? STDOUT_FILENO : STDIN_FILENO;
+    if (dup2(source, destination) < 0) _exit(125);
+    close(descriptors[0]); close(descriptors[1]);
+    execute_line(command);
+    std::cout.flush(); std::cerr.flush();
+    _exit(last_status() & 255);
+  }
+  if (direction == '<') {
+    close(descriptors[1]);
+    process_substitutions.emplace_back(descriptors[0], child);
+    return "/dev/fd/" + std::to_string(descriptors[0]);
+  }
+  close(descriptors[0]);
+  process_substitutions.emplace_back(descriptors[1], child);
+  return "/dev/fd/" + std::to_string(descriptors[1]);
+}
+
+size_t process_substitution_mark() { return process_substitutions.size(); }
+
+void finish_process_substitutions(size_t mark) {
+  if (mark > process_substitutions.size()) mark = process_substitutions.size();
+  for (size_t i = mark; i < process_substitutions.size(); ++i) close(process_substitutions[i].first);
+  for (size_t i = mark; i < process_substitutions.size(); ++i) {
+    const auto &[fd, pid] = process_substitutions[i];
+    (void)fd;
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  }
+  process_substitutions.resize(mark);
 }
 
 static size_t command_substitution_end(const std::string &word, size_t dollar) {
@@ -671,6 +743,15 @@ void expand_words(std::vector<std::string> &words) {
         auto home = home_expand(i, end);
         if (home) { append_text(*home, false); i = end - 1; continue; }
       }
+      if (w[i] == '\x08' && i + 2 < w.size() && w[i + 2] == '\x03') {
+        const size_t end = w.find('\x03', i + 3);
+        if (end == std::string::npos) { fail_expansion(); break; }
+        const std::string path = run_process_substitution(w.substr(i + 3, end - i - 3), w[i + 1]);
+        if (path.empty()) { fail_expansion(); break; }
+        append_text(path, false);
+        i = end;
+        continue;
+      }
       if (w[i] == '\x07' && i + 1 < w.size() && w[i + 1] == '\x03') {
         size_t end = w.find('\x03', i + 2);
         if (end == std::string::npos) { fail_expansion(); break; }
@@ -758,6 +839,13 @@ void expand_words(std::vector<std::string> &words) {
       std::string parameter_operator, parameter_word;
       std::string parameter_name;
       bool length_expansion = false;
+      bool substring_expansion = false, replace_expansion = false, replace_all = false;
+      long long substring_offset = 0, substring_length = 0;
+      bool has_substring_length = false;
+      std::string replace_pattern, replace_value;
+      char array_mode = 0;
+      size_t array_index = 0;
+      bool indexed_array = false;
       if (b < w.size() && w[b] == '{') {
         b++; e = w.find('}', b);
         if (e == std::string::npos) { append_text("$", false); continue; }
@@ -765,7 +853,24 @@ void expand_words(std::vector<std::string> &words) {
         if (!expression.empty() && expression[0] == '#') {
           length_expansion = true;
           expression.erase(expression.begin());
-        } else {
+        }
+        const size_t bracket = expression.find('[');
+        if (bracket != std::string::npos && expression.back() == ']') {
+          const std::string subscript = expression.substr(bracket + 1, expression.size() - bracket - 2);
+          expression.resize(bracket);
+          if (subscript == "@" || subscript == "*") array_mode = subscript[0];
+          else {
+            char *subscript_end = nullptr;
+            const unsigned long parsed = std::strtoul(subscript.c_str(), &subscript_end, 10);
+            if (subscript.empty() || subscript_end == subscript.c_str() || *subscript_end || parsed > 1000000) {
+              fail_expansion();
+              break;
+            }
+            indexed_array = true;
+            array_index = static_cast<size_t>(parsed);
+          }
+        }
+        {
           size_t removal_at = expression.find("##");
           if (removal_at != std::string::npos) {
             parameter_operator = "##";
@@ -794,6 +899,47 @@ void expand_words(std::vector<std::string> &words) {
               parameter_word = expression.substr(at + op.size());
               expression.resize(at);
               break;
+            }
+          }
+          if (parameter_operator.empty()) {
+            const size_t slash = expression.find('/');
+            const size_t slash2 = slash == std::string::npos ? slash : expression.find('/', slash + 1);
+            if (slash != std::string::npos && slash2 != std::string::npos) {
+              replace_expansion = true;
+              replace_all = slash + 1 < expression.size() && expression[slash + 1] == '/';
+              const size_t pattern_begin = slash + (replace_all ? 2 : 1);
+              const size_t separator = expression.find('/', pattern_begin);
+              if (separator == std::string::npos) {
+                replace_expansion = false;
+              } else {
+                replace_pattern = expression.substr(pattern_begin, separator - pattern_begin);
+                replace_value = expression.substr(separator + 1);
+                expression.resize(slash);
+              }
+            } else {
+              const size_t colon = expression.find(':');
+              if (colon != std::string::npos && colon + 1 < expression.size()) {
+                std::string spec = expression.substr(colon + 1);
+                while (!spec.empty() && std::isspace(static_cast<unsigned char>(spec.front()))) spec.erase(spec.begin());
+                const size_t second_colon = spec.find(':');
+                const std::string offset_text = spec.substr(0, second_colon);
+                char *offset_end = nullptr;
+                errno = 0;
+                substring_offset = std::strtoll(offset_text.c_str(), &offset_end, 10);
+                if (!errno && offset_end != offset_text.c_str() && !*offset_end) {
+                  substring_expansion = true;
+                  if (second_colon != std::string::npos) {
+                    const std::string length_text = spec.substr(second_colon + 1);
+                    char *length_end = nullptr;
+                    errno = 0;
+                    substring_length = std::strtoll(length_text.c_str(), &length_end, 10);
+                    if (errno || length_end == length_text.c_str() || *length_end)
+                      substring_expansion = false;
+                    else has_substring_length = true;
+                  }
+                  if (substring_expansion) expression.resize(colon);
+                }
+              }
             }
           }
           }
@@ -830,9 +976,82 @@ void expand_words(std::vector<std::string> &words) {
       }
       auto it = vars.find(k);
       const char *v = getenv(k.c_str());
-      const bool is_set = it != vars.end() || v != nullptr;
+      auto array_it = shell_state().arrays.find(k);
+      const bool is_set = it != vars.end() || v != nullptr || array_it != shell_state().arrays.end();
       std::string value = it != vars.end() ? it->second : (v ? v : "");
-      if (length_expansion) {
+      if (array_it != shell_state().arrays.end() && !array_mode && !indexed_array)
+        value = array_it->second.empty() ? std::string() : array_it->second.front();
+      auto strip_quote_markers = [](std::string text) {
+        text.erase(std::remove(text.begin(), text.end(), '\x01'), text.end());
+        text.erase(std::remove(text.begin(), text.end(), '\x02'), text.end());
+        return text;
+      };
+      if (replace_expansion && is_set && array_it == shell_state().arrays.end()) {
+        const std::string pattern = strip_quote_markers(replace_pattern);
+        const std::string replacement = strip_quote_markers(replace_value);
+        size_t cursor = 0;
+        while (cursor <= value.size()) {
+          bool matched = false;
+          for (size_t start = cursor; start <= value.size() && !matched; ++start) {
+            for (size_t end = value.size(); end >= start; --end) {
+              if (fnmatch(pattern.c_str(), value.substr(start, end - start).c_str(), 0) == 0) {
+                value.replace(start, end - start, replacement);
+                cursor = start + replacement.size();
+                matched = true;
+                break;
+              }
+              if (end == start) break;
+            }
+          }
+          if (!matched || !replace_all) break;
+          if (cursor == value.size() && pattern.empty()) break;
+          if (cursor > value.size()) break;
+        }
+      }
+      if (substring_expansion && is_set && array_it == shell_state().arrays.end()) {
+        const long long size = static_cast<long long>(value.size());
+        long long start = substring_offset < 0 ? size + substring_offset : substring_offset;
+        start = std::clamp(start, 0LL, size);
+        long long end = size;
+        if (has_substring_length) {
+          end = substring_length < 0 ? size + substring_length : start + substring_length;
+          end = std::clamp(end, start, size);
+        }
+        value = value.substr(static_cast<size_t>(start), static_cast<size_t>(end - start));
+      }
+      if (array_mode || indexed_array) {
+        if (array_it == shell_state().arrays.end()) {
+          if (nounset) { std::cerr << "dax: " << k << ": unset variable\n"; fail_expansion(); }
+        } else if (length_expansion) {
+          const size_t length = array_mode ? array_it->second.size()
+                                  : array_index < array_it->second.size()
+                                      ? array_it->second[array_index].size() : 0;
+          append_text(std::to_string(length), !double_quoted);
+        } else if (indexed_array) {
+          if (array_index < array_it->second.size()) append_text(array_it->second[array_index], !double_quoted);
+        } else if (array_mode == '@' && double_quoted) {
+          for (size_t j = 0; j < array_it->second.size(); ++j) {
+            if (j) { fields.emplace_back(); patterns.emplace_back(); has_pattern.push_back(false); }
+            append_text(array_it->second[j], false);
+          }
+          if (array_it->second.empty() && fields.size() == 1 && fields[0].empty()) fields.clear();
+        } else if (array_mode == '*' && double_quoted) {
+          auto ifs = vars.find("IFS");
+          const char *env_ifs = std::getenv("IFS");
+          const std::string sep = ifs != vars.end() ? ifs->second : env_ifs ? env_ifs : " \t\n";
+          std::string joined;
+          for (size_t j = 0; j < array_it->second.size(); ++j) {
+            if (j && !sep.empty()) joined += sep[0];
+            joined += array_it->second[j];
+          }
+          append_text(joined, false);
+        } else {
+          for (size_t j = 0; j < array_it->second.size(); ++j) {
+            if (j) append_text(" ", true);
+            append_text(array_it->second[j], true);
+          }
+        }
+      } else if (length_expansion) {
         append_text(std::to_string(value.size()), !double_quoted);
       } else if (parameter_operator == "#" || parameter_operator == "##" ||
                  parameter_operator == "%" || parameter_operator == "%%") {
@@ -923,9 +1142,32 @@ bool function_exists(const std::string &name) {
 bool shell_should_return() { return returning; }
 void enter_shell_loop() { ++loop_depth; }
 void leave_shell_loop() { if (loop_depth > 0) --loop_depth; }
-bool take_loop_break() { bool result = loop_break; loop_break = false; return result; }
-bool take_loop_continue() { bool result = loop_continue; loop_continue = false; return result; }
+int take_loop_control() {
+  if (!loop_break && !loop_continue) return 0;
+  if (loop_control_levels > 1) {
+    --loop_control_levels;
+    return 3;
+  }
+  const int result = loop_break ? 1 : 2;
+  loop_break = loop_continue = false;
+  loop_control_levels = 1;
+  return result;
+}
 bool loop_control_pending() { return loop_break || loop_continue; }
+void run_err_trap(int status) {
+  if (status == 0 || state.running_err_trap || state.err_trap_suppressed ||
+      errexit_ignored_context > 0 || errexit_immune_status)
+    return;
+  auto it = traps.find(-1);
+  if (it == traps.end()) return;
+  ++state.err_trap_generation;
+  state.running_err_trap = true;
+  const int saved_status = last_status();
+  set_last_status(status);
+  execute_line(it->second);
+  set_last_status(saved_status);
+  state.running_err_trap = false;
+}
 void run_exit_trap() {
   auto it = traps.find(0);
   if (it != traps.end()) {
@@ -945,6 +1187,20 @@ void run_pending_signal_trap() {
 }
 bool set_shell_variable(const std::string &name, const std::string &value,
                         bool export_value) {
+  const size_t bracket = name.find('[');
+  if (bracket != std::string::npos && name.back() == ']') {
+    const std::string array_name = name.substr(0, bracket);
+    const std::string index_text = name.substr(bracket + 1, name.size() - bracket - 2);
+    if (!name_ok(array_name) || index_text.empty()) return false;
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long index = std::strtoul(index_text.c_str(), &end, 10);
+    if (errno || end == index_text.c_str() || *end || index > 1000000) return false;
+    auto &array = state.arrays[array_name];
+    if (array.size() <= index) array.resize(index + 1);
+    array[index] = value;
+    return true;
+  }
   if (!name_ok(name) || readonly_vars.count(name)) {
     if (readonly_vars.count(name))
       std::cerr << name << ": readonly variable\n";
@@ -969,6 +1225,8 @@ bool set_shell_option(const std::string &name, bool enabled) {
     nounset = enabled;
   else if (name == "allexport" || name == "ALL_EXPORT")
     allexport = enabled;
+  else if (name == "pipefail")
+    state.pipefail = enabled;
   else if (name == "notify" || name == "notify_jobs")
     notify_jobs = enabled;
   else if (name == "noclobber")
@@ -991,6 +1249,7 @@ bool shell_option_enabled(const std::string &name) {
   if (name == "errexit" || name == "ERR_EXIT") return errexit;
   if (name == "nounset" || name == "NO_UNSET") return nounset;
   if (name == "allexport" || name == "ALL_EXPORT") return allexport;
+  if (name == "pipefail") return state.pipefail;
   if (name == "notify" || name == "notify_jobs") return notify_jobs;
   if (name == "noclobber") return noclobber;
   if (name == "noglob") return noglob;

@@ -53,7 +53,7 @@ static void print_usage(std::ostream &out) {
          "  +-OPTION, +-no-OPTION  Disable or enable a shell option\n"
          "  -a/-b/-C/-e/-f/-m/-n/-u/-v/-x and + forms\n"
          "                         POSIX shell option flags\n"
-         "Named options: allexport, notify, noclobber, errexit, noglob,\n"
+         "Named options: allexport, notify, noclobber, errexit, pipefail, noglob,\n"
          "               monitor, noexec, nounset, verbose, xtrace\n\n"
          "Dax supports POSIX-style invocation and these options; this does not\n"
          "claim full POSIX shell-language conformance.\n";

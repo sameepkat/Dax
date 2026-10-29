@@ -15,6 +15,7 @@ struct Redirection {
   bool expand_document = false;
   size_t line = 1;
   size_t column = 1;
+  bool here_string = false;
 };
 
 struct ASTNode {
@@ -28,6 +29,17 @@ struct CommandNode : public ASTNode {
   std::vector<std::pair<size_t, size_t>> arg_locations;
   std::vector<Redirection> redirections;
 
+  void print(int indent = 0) const override;
+  int execute() override;
+  int execute_command();
+};
+
+struct ArrayAssignmentNode : public ASTNode {
+  std::string name;
+  std::vector<std::string> values;
+  size_t index = 0;
+  bool indexed = false;
+  bool append = false;
   void print(int indent = 0) const override;
   int execute() override;
 };

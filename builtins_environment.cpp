@@ -65,6 +65,7 @@ std::optional<int> run_environment_builtin(const std::vector<std::string> &a,
         rc = 1;
       } else {
         state.vars.erase(a[i]);
+        state.arrays.erase(a[i]);
         unsetenv(a[i].c_str());
       }
     }

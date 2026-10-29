@@ -2,6 +2,7 @@
 #include "builtins.hpp"
 #include "helper.hpp"
 #include "janet_commands.hpp"
+#include "shell_state.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -12,6 +13,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+
+namespace {
+class ProcessSubstitutionScope {
+public:
+  ProcessSubstitutionScope() : mark_(process_substitution_mark()) {}
+  ~ProcessSubstitutionScope() { finish_process_substitutions(mark_); }
+private:
+  size_t mark_;
+};
+}
 
 void CommandNode::print(int indent) const {
   std::string padding(indent, ' ');
@@ -25,6 +36,39 @@ void CommandNode::print(int indent) const {
   std::cout << "\n";
 }
 
+void ArrayAssignmentNode::print(int indent) const {
+  std::cout << std::string(indent, ' ') << "Array assignment: " << name << '\n';
+}
+
+int ArrayAssignmentNode::execute() {
+  ProcessSubstitutionScope process_substitution_scope;
+  if (append && indexed) {
+    std::cerr << "dax: array append cannot use an index\n";
+    set_last_status(2);
+    run_err_trap(2);
+    return 2;
+  }
+  for (auto &value : values) value = std::string("\x02") + value + "\x02";
+  begin_word_expansion();
+  expand_words(values);
+  if (!word_expansion_succeeded()) {
+    set_last_status(1);
+    run_err_trap(1);
+    return 1;
+  }
+  auto &array = shell_state().arrays[name];
+  if (append) {
+    array.insert(array.end(), values.begin(), values.end());
+  } else if (indexed) {
+    if (array.size() <= index) array.resize(index + 1);
+    array[index] = values.empty() ? std::string() : values.front();
+  } else {
+    array = values;
+  }
+  set_last_status(0);
+  return 0;
+}
+
 void PipeNode::print(int indent) const {
   std::string padding(indent, ' ');
   std::cout << padding << "Pipe:\n";
@@ -35,6 +79,15 @@ void PipeNode::print(int indent) const {
 }
 
 int CommandNode::execute() {
+  ProcessSubstitutionScope process_substitution_scope;
+  const uint64_t err_generation = shell_state().err_trap_generation;
+  const int status = execute_command();
+  set_last_status(status);
+  if (err_generation == shell_state().err_trap_generation) run_err_trap(status);
+  return status;
+}
+
+int CommandNode::execute_command() {
   if (args.empty() && redirections.empty())
     return 0;
   std::vector<std::string> expanded = args;
@@ -103,6 +156,7 @@ int CommandNode::execute() {
         }
         content = expanded_content.empty() ? std::string() : expanded_content.front();
       }
+      if (red.here_string) content += '\n';
       FILE *temporary = tmpfile();
       if (!temporary || fwrite(content.data(), 1, content.size(), temporary) != content.size() ||
           fseek(temporary, 0, SEEK_SET) != 0 || dup2(fileno(temporary), STDIN_FILENO) < 0) {
@@ -335,7 +389,12 @@ int PipeNode::execute() {
     return 1;
   }
 
+  shell_state().err_trap_suppressed = true;
   pid_t pid1 = fork();
+  if (pid1 != 0) shell_state().err_trap_suppressed = false;
+  if (pid1 < 0) {
+    perror("fork"); close(pipefd[0]); close(pipefd[1]); return 1;
+  }
   if (pid1 == 0) {
     // Left child (writer)
     // Reset signals to default
@@ -351,7 +410,14 @@ int PipeNode::execute() {
     exit(0);
   }
 
+  shell_state().err_trap_suppressed = true;
   pid_t pid2 = fork();
+  if (pid2 != 0) shell_state().err_trap_suppressed = false;
+  if (pid2 < 0) {
+    perror("fork"); close(pipefd[0]); close(pipefd[1]); kill(pid1, SIGTERM);
+    while (waitpid(pid1, nullptr, 0) < 0 && errno == EINTR) {}
+    return 1;
+  }
   if (pid2 == 0) {
     // Right child (reader)
     // Reset signals to default
@@ -371,14 +437,25 @@ int PipeNode::execute() {
   close(pipefd[0]);
   close(pipefd[1]);
 
-  int status1, status2;
-  waitpid(pid1, &status1, 0);
-  waitpid(pid2, &status2, 0);
-
-  if (WIFEXITED(status2)) {
-    return WEXITSTATUS(status2);
-  }
-  return 1;
+  int status1 = 0, status2 = 0;
+  pid_t waited1;
+  do { waited1 = waitpid(pid1, &status1, 0); } while (waited1 < 0 && errno == EINTR);
+  pid_t waited2;
+  do { waited2 = waitpid(pid2, &status2, 0); } while (waited2 < 0 && errno == EINTR);
+  if (waited1 < 0) status1 = 255 << 8;
+  if (waited2 < 0) status2 = 255 << 8;
+  const auto command_status = [](int status) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
+  };
+  const int left_status = command_status(status1);
+  const int right_status = command_status(status2);
+  const int result = !shell_option_enabled("pipefail") ? right_status
+                     : right_status != 0 ? right_status : left_status;
+  set_last_status(result);
+  run_err_trap(result);
+  return result;
 }
 
 int ListNode::execute() {
@@ -446,7 +523,9 @@ int GroupNode::execute() {
     set_last_status(status);
     return status;
   }
+  shell_state().err_trap_suppressed = true;
   pid_t pid = fork();
+  if (pid != 0) shell_state().err_trap_suppressed = false;
   if (pid < 0) { perror("fork"); return 1; }
   if (pid == 0) {
     int status = child ? child->execute() : 0;
@@ -458,6 +537,7 @@ int GroupNode::execute() {
   while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
   int result = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
   set_last_status(result);
+  run_err_trap(result);
   return result;
 }
 
@@ -504,14 +584,16 @@ int LoopNode::execute() {
     end_errexit_ignored_context();
     set_last_status(condition_status);
     if (shell_noexec_enabled()) { status = condition_status; break; }
-    if (take_loop_break()) break;
-    if (take_loop_continue()) continue;
+    const int condition_control = take_loop_control();
+    if (condition_control == 1 || condition_control == 3) break;
+    if (condition_control == 2) continue;
     if (until ? condition_status == 0 : condition_status != 0) break;
     status = body ? body->execute() : 0;
     set_last_status(status);
     if (shell_noexec_enabled()) break;
-    if (take_loop_break()) break;
-    if (take_loop_continue()) continue;
+    const int body_control = take_loop_control();
+    if (body_control == 1 || body_control == 3) break;
+    if (body_control == 2) continue;
   }
   leave_shell_loop();
   return status;
@@ -524,6 +606,7 @@ void ForNode::print(int indent) const {
 }
 
 int ForNode::execute() {
+  ProcessSubstitutionScope process_substitution_scope;
   begin_word_expansion();
   expand_words(values);
   if (!word_expansion_succeeded()) return 1;
@@ -535,8 +618,9 @@ int ForNode::execute() {
     status = body ? body->execute() : 0;
     set_last_status(status);
     if (shell_noexec_enabled()) break;
-    if (take_loop_break()) break;
-    if (take_loop_continue()) continue;
+    const int control = take_loop_control();
+    if (control == 1 || control == 3) break;
+    if (control == 2) continue;
   }
   leave_shell_loop();
   return status;
@@ -551,6 +635,7 @@ void CaseNode::print(int indent) const {
 }
 
 int CaseNode::execute() {
+  ProcessSubstitutionScope process_substitution_scope;
   std::vector<std::string> subject{value};
   begin_word_expansion();
   expand_words(subject);
