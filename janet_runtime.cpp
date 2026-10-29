@@ -1,6 +1,7 @@
 #include "janet_runtime.hpp"
+#include "janet_commands.hpp"
 #include "janet.h"
-#include "builtins.hpp"
+#include "shell_host.hpp"
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -290,8 +291,7 @@ Janet c_alias(int32_t argc, Janet *argv) {
   const char *name = janet_getcstring(argv, 0);
   const char *value = janet_getcstring(argv, 1);
   if (!name || !value) janet_panic("alias expects name and value strings");
-  auto result = handle_builtin({"alias", std::string(name) + "=" + value});
-  return janet_wrap_boolean(result.value_or(1) == 0);
+  return janet_wrap_boolean(shell_define_alias(name, value));
 }
 
 Janet c_set_prompt(int32_t argc, Janet *argv) {

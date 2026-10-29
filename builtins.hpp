@@ -5,14 +5,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "job.hpp"
 #include "tokenizer.hpp"
-
-struct Job {
-  int id;
-  int pid;
-  std::string command;
-  bool stopped = false;
-};
 
 std::optional<int> handle_builtin(const std::vector<std::string> &args);
 bool is_builtin(const std::string &name);
@@ -27,7 +21,6 @@ int last_status();
 bool shell_should_exit();
 int requested_exit_status();
 void clear_exit_request();
-void execute_line(const std::string &line);
 std::vector<ShellToken> tokenize(const std::string &line);
 void expand_words(std::vector<std::string> &words);
 void expand_aliases(std::vector<ShellToken> &words);

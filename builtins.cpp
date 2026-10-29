@@ -1,6 +1,12 @@
 #include "builtins.hpp"
 #include "helper.hpp"
 #include "janet_runtime.hpp"
+#include "janet_commands.hpp"
+#include "shell_host.hpp"
+#include "shell_state.hpp"
+#include "shell.hpp"
+#include "builtins_internal.hpp"
+#include "builtins_internal.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -24,36 +30,46 @@
 #include <unistd.h>
 
 namespace {
-std::unordered_map<std::string, std::string> aliases, vars, readonly_vars,
-    command_hash;
-std::unordered_map<std::string, std::string> functions;
-std::unordered_map<int, std::string> traps;
-std::vector<std::string> dirs, positionals;
-std::string shell_name = "dax";
-std::vector<Job> jobs;
-int status_value = 0, exit_value = 0;
-bool exiting = false, errexit = false, nounset = false, allexport = false;
-bool notify_jobs = false, noclobber = false, noglob = false, monitor = false;
-bool noexec = false, verbose = false, xtrace = false;
-bool login_shell = false, interactive_shell = false;
-int errexit_ignored_context = 0;
-bool errexit_immune_status = false;
-bool returning = false;
-int loop_depth = 0;
-bool loop_break = false, loop_continue = false;
-int substitution_status = 0;
-bool substitution_ran = false;
-volatile sig_atomic_t pending_signal = 0;
-bool expansion_error = false;
-size_t expansion_error_index = 0;
-size_t getopts_index = 1, getopts_char = 1;
-struct SavedVar {
-  bool had_var;
-  std::string var;
-  bool had_env;
-  std::string env;
-};
-std::vector<std::unordered_map<std::string, SavedVar>> local_scopes;
+ShellState &state = shell_state();
+auto &aliases = state.aliases;
+auto &vars = state.vars;
+auto &readonly_vars = state.readonly_vars;
+auto &command_hash = state.command_hash;
+auto &functions = state.functions;
+auto &traps = state.traps;
+auto &dirs = state.dirs;
+auto &positionals = state.positionals;
+auto &shell_name = state.shell_name;
+auto &jobs = state.jobs;
+auto &status_value = state.status_value;
+auto &exit_value = state.exit_value;
+auto &exiting = state.exiting;
+auto &errexit = state.errexit;
+auto &nounset = state.nounset;
+auto &allexport = state.allexport;
+auto &notify_jobs = state.notify_jobs;
+auto &noclobber = state.noclobber;
+auto &noglob = state.noglob;
+auto &monitor = state.monitor;
+auto &noexec = state.noexec;
+auto &verbose = state.verbose;
+auto &xtrace = state.xtrace;
+auto &login_shell = state.login_shell;
+auto &interactive_shell = state.interactive_shell;
+auto &errexit_ignored_context = state.errexit_ignored_context;
+auto &errexit_immune_status = state.errexit_immune_status;
+auto &returning = state.returning;
+auto &loop_depth = state.loop_depth;
+auto &loop_break = state.loop_break;
+auto &loop_continue = state.loop_continue;
+auto &substitution_status = state.substitution_status;
+auto &substitution_ran = state.substitution_ran;
+auto &pending_signal = state.pending_signal;
+auto &expansion_error = state.expansion_error;
+auto &expansion_error_index = state.expansion_error_index;
+auto &getopts_index = state.getopts_index;
+auto &getopts_char = state.getopts_char;
+auto &local_scopes = state.local_scopes;
 
 bool name_ok(const std::string &s) {
   return !s.empty() && (std::isalpha((unsigned char)s[0]) || s[0] == '_') &&
@@ -166,6 +182,14 @@ std::optional<int> run(const std::vector<std::string> &a) {
   if (a.empty())
     return 0;
   const auto &c = a[0];
+  if (auto result = run_navigation_builtin(a, state)) return result;
+  if (auto result = run_history_builtin(a)) return result;
+  if (auto result = run_options_builtin(a, state)) return result;
+  if (auto result = run_output_builtin(a)) return result;
+  if (auto result = run_system_builtin(a)) return result;
+  if (auto result = run_environment_builtin(a, state)) return result;
+  if (auto result = run_jobs_builtin(a, state)) return result;
+  if (auto result = run_lookup_builtin(a, state)) return result;
   if (c == ":")
     return 0;
   if (c == "true")
@@ -194,497 +218,6 @@ std::optional<int> run(const std::vector<std::string> &a) {
     exiting = true;
     History::save_to_file();
     return exit_value;
-  }
-  if (c == "cd") {
-    if (a.size() > 2) {
-      std::cerr << "cd: too many arguments\n";
-      return 1;
-    }
-    const char *h = getenv("HOME");
-    const char *old = getenv("OLDPWD");
-    std::string p = a.size() > 1 ? a[1] : (h ? h : "");
-    if (p == "-")
-      p = old ? old : "";
-    if (p.empty()) {
-      std::cerr << "cd: HOME not set\n";
-      return 1;
-    }
-    if (p[0] == '~' && (p.size() == 1 || p[1] == '/') && h)
-      p = std::string(h) + p.substr(1);
-    char before[4096], after[4096];
-    getcwd(before, sizeof(before));
-    if (chdir(p.c_str())) {
-      std::cerr << "cd: " << strerror(errno) << '\n';
-      return 1;
-    }
-    if (getcwd(after, sizeof(after))) {
-      setenv("OLDPWD", before, 1);
-      setenv("PWD", after, 1);
-      vars["OLDPWD"] = before;
-      vars["PWD"] = after;
-    }
-    if (a.size() > 1 && a[1] == "-")
-      std::cout << getenv("PWD") << '\n';
-    return 0;
-  }
-  if (c == "pwd") {
-    char b[4096];
-    if (!getcwd(b, sizeof(b))) {
-      perror("pwd");
-      return 1;
-    }
-    std::cout << b << '\n';
-    return 0;
-  }
-  if (c == "umask") {
-    if (a.size() == 1) {
-      const mode_t current = umask(0);
-      umask(current);
-      std::cout << std::oct;
-      std::cout.width(4);
-      std::cout.fill('0');
-      std::cout << current << std::dec << '\n';
-      return 0;
-    }
-    size_t index = 1;
-    bool symbolic = a[index] == "-S";
-    if (symbolic) {
-      const mode_t current = umask(0);
-      umask(current);
-      const mode_t allowed = static_cast<mode_t>(~current) & 0777;
-      auto perms = [&](mode_t read, mode_t write, mode_t execute) {
-        std::string value;
-        value += (allowed & read) ? 'r' : '-';
-        value += (allowed & write) ? 'w' : '-';
-        value += (allowed & execute) ? 'x' : '-';
-        return value;
-      };
-      std::cout << "u=" << perms(S_IRUSR, S_IWUSR, S_IXUSR)
-                << ",g=" << perms(S_IRGRP, S_IWGRP, S_IXGRP)
-                << ",o=" << perms(S_IROTH, S_IWOTH, S_IXOTH) << '\n';
-      return a.size() == 2 ? 0 : 2;
-    }
-    if (a.size() != 2) return 2;
-    char *end = nullptr;
-    errno = 0;
-    const unsigned long value = std::strtoul(a[index].c_str(), &end, 8);
-    if (errno || end == a[index].c_str() || *end || value > 0777) {
-      std::cerr << "umask: expected an octal mask from 000 to 777\n";
-      return 2;
-    }
-    umask(static_cast<mode_t>(value));
-    return 0;
-  }
-  if (c == "times") {
-    if (a.size() != 1) return 2;
-    struct tms usage{};
-    if (times(&usage) == static_cast<clock_t>(-1)) {
-      perror("times");
-      return 1;
-    }
-    const long ticks = sysconf(_SC_CLK_TCK);
-    auto print_time = [&](clock_t value) {
-      const double seconds = ticks > 0 ? static_cast<double>(value) / ticks : 0.0;
-      const long minutes = static_cast<long>(seconds / 60.0);
-      std::cout << minutes << 'm' << (seconds - minutes * 60.0) << "s";
-    };
-    print_time(usage.tms_utime); std::cout << ' ';
-    print_time(usage.tms_stime); std::cout << '\n';
-    print_time(usage.tms_cutime); std::cout << ' ';
-    print_time(usage.tms_cstime); std::cout << '\n';
-    return 0;
-  }
-  if (c == "ulimit") {
-    char option = 'f';
-    size_t index = 1;
-    if (index < a.size() && a[index].size() == 2 && a[index][0] == '-') {
-      option = a[index][1];
-      ++index;
-    }
-    auto resource_for = [&](char which) -> int {
-      if (which == 'f') return RLIMIT_FSIZE;
-#ifdef RLIMIT_NOFILE
-      if (which == 'n') return RLIMIT_NOFILE;
-#endif
-      return -1;
-    };
-    auto describe = [&](char which) {
-      const int resource = resource_for(which);
-      if (resource < 0) return false;
-      struct rlimit limit{};
-      if (getrlimit(resource, &limit) != 0) return false;
-      if (limit.rlim_cur == RLIM_INFINITY) std::cout << "unlimited\n";
-      else if (which == 'f') std::cout << (limit.rlim_cur / 512) << '\n';
-      else std::cout << limit.rlim_cur << '\n';
-      return true;
-    };
-    if (option == 'a') {
-      if (index != a.size()) return 2;
-      std::cout << "file size (blocks) "; describe('f');
-      std::cout << "open files         "; describe('n');
-      return 0;
-    }
-    const int resource = resource_for(option);
-    if (resource < 0) {
-      std::cerr << "ulimit: supported limits are -f, -n, and -a\n";
-      return 2;
-    }
-    struct rlimit limit{};
-    if (getrlimit(resource, &limit) != 0) { perror("ulimit"); return 1; }
-    if (index == a.size()) return describe(option) ? 0 : 1;
-    if (index + 1 != a.size()) return 2;
-    rlim_t parsed = RLIM_INFINITY;
-    if (a[index] != "unlimited") {
-      char *end = nullptr;
-      errno = 0;
-      unsigned long long value = std::strtoull(a[index].c_str(), &end, 10);
-      if (errno || end == a[index].c_str() || *end) return 2;
-      if (option == 'f') value *= 512;
-      parsed = static_cast<rlim_t>(value);
-    }
-    limit.rlim_cur = parsed;
-    if (setrlimit(resource, &limit) != 0) { perror("ulimit"); return 1; }
-    return 0;
-  }
-  if (c == "echo") {
-    size_t i = 1;
-    bool nl = true;
-    if (i < a.size() && a[i] == "-n") {
-      ++i;
-      nl = false;
-    }
-    for (size_t j = i; j < a.size(); ++j) {
-      if (j > i)
-        std::cout << ' ';
-      std::cout << a[j];
-    }
-    if (nl)
-      std::cout << '\n';
-    return 0;
-  }
-  if (c == "export" || c == "typeset" || c == "local" || c == "readonly") {
-    size_t i = 1;
-    if (i == a.size()) {
-      for (auto &[k, v] : vars)
-        std::cout << (c == "export" ? "export " : "") << k << '=' << v << '\n';
-      return 0;
-    }
-    if (a[i] == "-p" || a[i] == "-x" || a[i] == "-r")
-      ++i;
-    for (; i < a.size(); ++i) {
-      auto p = a[i].find('=');
-      std::string key = a[i].substr(0, p);
-      if (c == "local" && local_scopes.empty()) {
-        std::cerr << "local: can only be used in a function\n";
-        return 1;
-      }
-      if ((c == "local" || c == "typeset") && !local_scopes.empty() &&
-          name_ok(key)) {
-        if (!local_scopes.back().count(key)) {
-          const char *old = getenv(key.c_str());
-          auto vi = vars.find(key);
-          local_scopes.back()[key] = {vi != vars.end(),
-                                      vi != vars.end() ? vi->second : "",
-                                      old != nullptr, old ? old : ""};
-        }
-      }
-      if (p != std::string::npos) {
-        if (!setvar(a[i], c == "export"))
-          return 1;
-        if (c == "readonly")
-          readonly_vars[key] = 1;
-      } else if (c == "readonly")
-        readonly_vars[key] = 1;
-      else if (c == "export") {
-        auto vi = vars.find(key);
-        if (vi != vars.end() && setenv(key.c_str(), vi->second.c_str(), 1))
-          return 1;
-      } else if (c == "local" || c == "typeset") {
-        const char *v = getenv(a[i].c_str());
-        vars[a[i]] = v ? v : "";
-      }
-    }
-    return 0;
-  }
-  if (c == "unset") {
-    int rc = 0;
-    for (size_t i = 1; i < a.size(); ++i) {
-      if (a[i] == "-f" && i + 1 < a.size()) {
-        functions.erase(a[++i]);
-        continue;
-      }
-      if (readonly_vars.count(a[i])) {
-        std::cerr << "unset: " << a[i] << ": readonly variable\n";
-        rc = 1;
-      } else {
-        vars.erase(a[i]);
-        unsetenv(a[i].c_str());
-      }
-    }
-    return rc;
-  }
-  if (c == "alias") {
-    if (a.size() == 1) {
-      for (auto &[k, v] : aliases)
-        std::cout << "alias " << k << "='" << v << "'\n";
-      return 0;
-    }
-    for (size_t i = 1; i < a.size(); ++i) {
-      auto p = a[i].find('=');
-      if (p == std::string::npos) {
-        auto it = aliases.find(a[i]);
-        if (it == aliases.end())
-          return 1;
-        std::cout << "alias " << it->first << "='" << it->second << "'\n";
-      } else
-        aliases[a[i].substr(0, p)] = a[i].substr(p + 1);
-    }
-    return 0;
-  }
-  if (c == "unalias") {
-    if (a.size() < 2)
-      return 2;
-    int rc = 0;
-    for (size_t i = 1; i < a.size(); ++i)
-      if (!aliases.erase(a[i]))
-        rc = 1;
-    return rc;
-  }
-  if (c == "history") {
-    if (a.size() == 1)
-      History::print();
-    else if (a[1] == "-c")
-      History::clear();
-    else if (a[1] == "-d" && a.size() > 2) {
-      try {
-        History::remove(std::stoi(a[2]) - 1);
-      } catch (...) {
-        std::cerr << "history: numeric argument required\n";
-        return 2;
-      }
-    } else {
-      try {
-        History::print(std::stoi(a[1]));
-      } catch (...) {
-        std::cerr << "history: numeric argument required\n";
-        return 2;
-      }
-    }
-    return 0;
-  }
-  if (c == "fc") {
-    bool list = a.size() == 1 || (a.size() > 1 && a[1] == "-l");
-    if (list) {
-      const auto &items = History::get_all();
-      size_t first = items.size() > 16 ? items.size() - 16 : 0;
-      for (size_t i = first; i < items.size(); ++i)
-        std::cout << (i + 1) << "\t" << items[i] << '\n';
-      return 0;
-    }
-    if (a[1] == "-s") {
-      const auto &items = History::get_all();
-      if (items.empty()) return 1;
-      size_t selected = items.size() - 1;
-      if (items[selected].rfind("fc -s", 0) == 0 && selected) --selected;
-      std::string command = items[selected];
-      if (a.size() >= 3) {
-        const size_t eq = a[2].find('=');
-        if (eq == std::string::npos) return 2;
-        const size_t at = command.find(a[2].substr(0, eq));
-        if (at != std::string::npos) command.replace(at, eq, a[2].substr(eq + 1));
-      }
-      execute_line(command);
-      return last_status();
-    }
-    std::cerr << "fc: editor mode is not supported; use fc -l or fc -s\n";
-    return 2;
-  }
-  if (c == "command" || c == "builtin" || c == "type" || c == "whence" ||
-      c == "which") {
-    if (a.size() < 2)
-      return 2;
-    size_t i = (a[1] == "-v" || a[1] == "-V" || a[1] == "-p") ? 2 : 1;
-    if (c == "command" && i == 1)
-      return external(std::vector<std::string>(a.begin() + 1, a.end()));
-    if (c == "builtin" && i == 1) {
-      std::vector<std::string> nested(a.begin() + 1, a.end());
-      auto result = run(nested);
-      return result ? *result : 1;
-    }
-    if (c == "command" && a[1] == "-v") {
-      int rc = 0;
-      for (size_t n = 2; n < a.size(); ++n) {
-        if (is_builtin(a[n]) || functions.count(a[n]))
-          std::cout << a[n] << '\n';
-        else if (auto path = find_command(a[n]))
-          std::cout << *path << '\n';
-        else
-          rc = 1;
-      }
-      return rc;
-    }
-    int rc = 0;
-    for (; i < a.size(); ++i) {
-      if (is_builtin(a[i]))
-        std::cout << a[i] << " is a shell builtin\n";
-      else if (functions.count(a[i]))
-        std::cout << a[i] << " is a shell function\n";
-      else if (aliases.count(a[i]))
-        std::cout << a[i] << " is an alias\n";
-      else if (auto p = find_command(a[i]))
-        std::cout << *p << '\n';
-      else {
-        std::cerr << a[i] << ": not found\n";
-        rc = 1;
-      }
-    }
-    return rc;
-  }
-  if (c == "pushd" || c == "popd" || c == "dirs") {
-    char cwd[4096];
-    if (!getcwd(cwd, sizeof(cwd)))
-      return 1;
-    if (c == "dirs") {
-      std::cout << cwd;
-      for (auto &d : dirs)
-        std::cout << ' ' << d;
-      std::cout << '\n';
-      return 0;
-    }
-    if (c == "pushd" && a.size() > 1) {
-      if (chdir(a[1].c_str()))
-        return 1;
-      dirs.insert(dirs.begin(), cwd);
-    } else if (c == "pushd") {
-      if (dirs.empty())
-        return 1;
-      std::string target = dirs.front();
-      dirs.erase(dirs.begin());
-      if (chdir(target.c_str()))
-        return 1;
-      dirs.insert(dirs.begin(), cwd);
-    } else {
-      if (dirs.empty())
-        return 1;
-      std::string target = dirs.front();
-      if (chdir(target.c_str()))
-        return 1;
-      dirs.erase(dirs.begin());
-    }
-    getcwd(cwd, sizeof(cwd));
-    setenv("PWD", cwd, 1);
-    std::cout << cwd << '\n';
-    return 0;
-  }
-  if (c == "jobs") {
-    const int current_job = jobs.empty() ? -1 : jobs.back().id;
-    const int previous_job = jobs.size() < 2 ? -1 : jobs[jobs.size() - 2].id;
-    auto marker_for = [&](int id) {
-      return id == current_job ? '+' : id == previous_job ? '-' : ' ';
-    };
-    for (auto it = jobs.begin(); it != jobs.end();) {
-      int st;
-      pid_t r = waitpid(it->pid, &st, WNOHANG | WUNTRACED);
-      if (r == it->pid && (WIFEXITED(st) || WIFSIGNALED(st))) {
-        std::cout << '[' << it->id << ']' << marker_for(it->id) << "  Done "
-                  << it->command << '\n';
-        it = jobs.erase(it);
-      } else {
-        if (r == it->pid && WIFSTOPPED(st))
-          it->stopped = true;
-        std::cout << '[' << it->id << ']' << marker_for(it->id) << "  "
-                  << (it->stopped ? "Stopped" : "Running") << ' ' << it->command
-                  << " &\n";
-        ++it;
-      }
-    }
-    return 0;
-  }
-  if (c == "fg" || c == "bg" || c == "wait" || c == "disown") {
-    if (c == "wait" && a.size() == 1) {
-      for (auto it = jobs.begin(); it != jobs.end();) {
-        int status = 0;
-        while (waitpid(it->pid, &status, 0) < 0 && errno == EINTR) {}
-        it = jobs.erase(it);
-      }
-      return 0;
-    }
-    if (jobs.empty()) {
-      const std::string job = a.size() > 1 ? a[1] : "%+";
-      std::cerr << c << ": " << job << ": no such job\n";
-      return c == "wait" ? 127 : 1;
-    }
-    int id = jobs.back().id;
-    if (a.size() > 1) {
-      std::string x = a[1];
-      if (x[0] == '%')
-        x.erase(0, 1);
-      id = atoi(x.c_str());
-    }
-    auto it = std::find_if(jobs.begin(), jobs.end(),
-                           [&](auto &j) { return j.id == id; });
-    if (it == jobs.end()) {
-      const std::string job = a.size() > 1 ? a[1] : "%+";
-      std::cerr << c << ": " << job << ": no such job\n";
-      return c == "wait" ? 127 : 1;
-    }
-    if (c == "disown") {
-      jobs.erase(it);
-      return 0;
-    }
-    if (c == "bg") {
-      kill(-it->pid, SIGCONT);
-      it->stopped = false;
-      return 0;
-    }
-    if (c == "fg") {
-      if (monitor && isatty(STDIN_FILENO))
-        tcsetpgrp(STDIN_FILENO, it->pid);
-      kill(-it->pid, SIGCONT);
-    }
-    int st = 0;
-    waitpid(it->pid, &st, c == "fg" ? WUNTRACED : 0);
-    if (c == "fg" && monitor && isatty(STDIN_FILENO))
-      tcsetpgrp(STDIN_FILENO, getpgrp());
-    if (WIFSTOPPED(st))
-      it->stopped = true;
-    else
-      jobs.erase(it);
-    return WIFEXITED(st)     ? WEXITSTATUS(st)
-           : WIFSIGNALED(st) ? 128 + WTERMSIG(st)
-                             : 1;
-  }
-  if (c == "kill") {
-    if (a.size() < 2)
-      return 2;
-    int sig = SIGTERM;
-    size_t i = 1;
-    if (a[i][0] == '-') {
-      sig = signal_number(a[i++]);
-      if (!sig)
-        return 2;
-    }
-    int rc = 0;
-    for (; i < a.size(); ++i) {
-      pid_t p = atoi(a[i].c_str());
-      if (a[i][0] == '%') {
-        int id = atoi(a[i].c_str() + 1);
-        auto it = std::find_if(jobs.begin(), jobs.end(),
-                               [&](auto &j) { return j.id == id; });
-        if (it == jobs.end()) {
-          rc = 1;
-          continue;
-        }
-        p = -it->pid;
-      }
-      if (kill(p, sig))
-        rc = 1;
-    }
-    return rc;
-  }
-  if (c == "suspend") {
-    kill(getpid(), SIGSTOP);
-    return 0;
   }
   if (c == "read") {
     std::string line;
@@ -726,195 +259,6 @@ std::optional<int> run(const std::vector<std::string> &a) {
       if (!set_shell_variable(a[i], v))
         return 1;
     }
-    return 0;
-  }
-  if (c == "printf") {
-    if (a.size() < 2)
-      return 0;
-    size_t n = 2;
-    for (size_t i = 0; i < a[1].size(); ++i) {
-      if (a[1][i] == '%' && i + 1 < a[1].size()) {
-        char f = a[1][++i];
-        if (f == '%')
-          std::cout << '%';
-        else if (f == 's')
-          std::cout << (n < a.size() ? a[n++] : "");
-        else if (f == 'd' || f == 'i')
-          std::cout << atoi(n < a.size() ? a[n++].c_str() : "0");
-        else
-          return 1;
-      } else if (a[1][i] == '\\' && i + 1 < a[1].size()) {
-        char x = a[1][++i];
-        std::cout << (x == 'n' ? '\n' : x == 't' ? '\t' : x);
-      } else
-        std::cout << a[1][i];
-    }
-    return 0;
-  }
-  if (c == "test" || c == "[") {
-    size_t end = a.size();
-    if (c == "[") {
-      if (end < 2 || a.back() != "]") {
-        std::cerr << "[: missing ]\n";
-        return 2;
-      }
-      --end;
-    }
-    auto eval = [&](auto &&self, size_t b, size_t e) -> int {
-      if (b == e)
-        return 1;
-      if (a[b] == "!")
-        return self(self, b + 1, e) == 0 ? 0 : 1;
-      if (e - b == 1)
-        return a[b].empty() ? 1 : 0;
-      if (e - b == 2) {
-        struct stat st;
-        const auto &op = a[b];
-        const auto &v = a[b + 1];
-        bool ok = false;
-        if (op == "-n")
-          ok = !v.empty();
-        else if (op == "-z")
-          ok = v.empty();
-        else if (op == "-e" || op == "-a")
-          ok = access(v.c_str(), F_OK) == 0;
-        else if (op == "-f")
-          ok = stat(v.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-        else if (op == "-d")
-          ok = stat(v.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-        else if (op == "-r")
-          ok = access(v.c_str(), R_OK) == 0;
-        else if (op == "-w")
-          ok = access(v.c_str(), W_OK) == 0;
-        else if (op == "-x")
-          ok = access(v.c_str(), X_OK) == 0;
-        else if (op == "-s")
-          ok = stat(v.c_str(), &st) == 0 && st.st_size > 0;
-        else
-          return 2;
-        return ok ? 0 : 1;
-      }
-      for (size_t i = b + 1; i + 1 < e; ++i)
-        if (a[i] == "-a" || a[i] == "-o") {
-          int l = self(self, b, i), r = self(self, i + 1, e);
-          return a[i] == "-a" ? (l == 0 && r == 0 ? 0 : 1)
-                              : (l == 0 || r == 0 ? 0 : 1);
-        }
-      if (e - b != 3)
-        return 2;
-      const auto &l = a[b];
-      const auto &op = a[b + 1];
-      const auto &r = a[b + 2];
-      if (op == "=" || op == "==")
-        return l == r ? 0 : 1;
-      if (op == "!=")
-        return l != r ? 0 : 1;
-      char *le = nullptr;
-      char *re = nullptr;
-      long lv = strtol(l.c_str(), &le, 10), rv = strtol(r.c_str(), &re, 10);
-      if (!le || *le || !re || *re)
-        return 2;
-      if (op == "-eq")
-        return lv == rv ? 0 : 1;
-      if (op == "-ne")
-        return lv != rv ? 0 : 1;
-      if (op == "-gt")
-        return lv > rv ? 0 : 1;
-      if (op == "-ge")
-        return lv >= rv ? 0 : 1;
-      if (op == "-lt")
-        return lv < rv ? 0 : 1;
-      if (op == "-le")
-        return lv <= rv ? 0 : 1;
-      return 2;
-    };
-    return eval(eval, 1, end);
-  }
-  if (c == "set" || c == "setopt" || c == "unsetopt") {
-    static const std::vector<std::string> shell_options = {
-        "allexport", "notify", "noclobber", "errexit", "noglob",
-        "monitor", "noexec", "nounset", "verbose", "xtrace"};
-    if ((c == "setopt" || c == "unsetopt") && a.size() == 1) {
-      for (const auto &name : shell_options)
-        std::cout << name << '\t'
-                  << (shell_option_enabled(name) ? "on" : "off")
-                  << '\n';
-      return 0;
-    }
-    if (c == "set" && (a.size() == 2 && (a[1] == "-o" || a[1] == "+o"))) {
-      for (const auto &name : shell_options)
-        std::cout << name << '\t'
-                  << (shell_option_enabled(name) ? "on" : "off")
-                  << '\n';
-      return 0;
-    }
-    for (size_t i = 1; i < a.size(); ++i) {
-      auto x = a[i];
-      bool on = c != "unsetopt";
-      if (c == "set" && x == "--") {
-        positionals.assign(a.begin() + i + 1, a.end());
-        break;
-      } else if (c == "set" && x.find('=') != std::string::npos) {
-        if (!setvar(x))
-          return 1;
-      } else if (x == "-o" || x == "+o") {
-        if (i + 1 >= a.size()) {
-          for (const auto &name : shell_options)
-            std::cout << name << '\t'
-                      << (shell_option_enabled(name) ? "on" : "off") << '\n';
-          break;
-        }
-        if (!set_shell_option(a[++i], x == "-o")) {
-          std::cerr << c << ": unsupported option: " << a[i] << '\n';
-          return 2;
-        }
-      } else if ((x.size() > 1 && (x[0] == '-' || x[0] == '+')) && c == "set") {
-        on = x[0] == '-';
-        for (size_t j = 1; j < x.size(); ++j) {
-          const char flag = x[j];
-          const std::string name = flag == 'a' ? "allexport"
-                                   : flag == 'b' ? "notify"
-                                   : flag == 'C' ? "noclobber"
-                                   : flag == 'e' ? "errexit"
-                                   : flag == 'f' ? "noglob"
-                                   : flag == 'm' ? "monitor"
-                                   : flag == 'n' ? "noexec"
-                                   : flag == 'u' ? "nounset"
-                                   : flag == 'v' ? "verbose"
-                                   : flag == 'x' ? "xtrace" : "";
-          if (name.empty()) {
-            std::cerr << c << ": unsupported option: " << flag << '\n';
-            return 2;
-          }
-          set_shell_option(name, on);
-        }
-      } else if (!set_shell_option(x, on)) {
-        std::cerr << c << ": unsupported option: " << x << '\n';
-        return 2;
-      }
-    }
-    return 0;
-  }
-  if (c == "hash") {
-    if (a.size() == 1) {
-      for (auto &[n, p] : command_hash)
-        std::cout << n << " = " << p << '\n';
-      return 0;
-    }
-    if (a[1] == "-r") {
-      command_hash.clear();
-      return 0;
-    }
-    if (a[1] == "-d") {
-      if (a.size() < 3)
-        return 2;
-      return command_hash.erase(a[2]) ? 0 : 1;
-    }
-    for (size_t i = 1; i < a.size(); ++i)
-      if (!find_command(a[i])) {
-        std::cerr << "hash: " << a[i] << ": not found\n";
-        return 1;
-      }
     return 0;
   }
   if (c == "source" || c == ".") {
@@ -1066,8 +410,18 @@ std::optional<int> run(const std::vector<std::string> &a) {
   return {};
 }
 } // namespace
+bool shell_set_assignment(const std::string &value, bool export_it) {
+  return setvar(value, export_it);
+}
+bool shell_valid_name(const std::string &name) { return name_ok(name); }
+std::optional<std::string> shell_find_command(const std::string &name) { return find_command(name); }
+int shell_external_command(const std::vector<std::string> &args) { return external(args); }
+int shell_signal_number(const std::string &name) { return signal_number(name); }
 std::optional<int> handle_builtin(const std::vector<std::string> &a) {
   return run(a);
+}
+bool shell_define_alias(const std::string &name, const std::string &value) {
+  return handle_builtin({"alias", name + "=" + value}).value_or(1) == 0;
 }
 bool is_builtin(const std::string &n) {
   static const std::vector<std::string> names = {
