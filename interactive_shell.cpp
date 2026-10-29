@@ -369,15 +369,6 @@ int run_interactive_shell() {
   // Load history from file on startup
   History::load_from_file();
 
-  // Set history size limit to 1000 commands
-  stifle_history(1000);
-
-  // Load existing history into readline
-  const auto &hist = History::get_all();
-  for (const auto &cmd : hist) {
-    add_history(cmd.c_str());
-  }
-
   configure_interactive_readline();
 
   setup_signals();
@@ -416,8 +407,6 @@ int run_interactive_shell() {
     if (line.empty() && command_buffer.empty())
       continue;
 
-    // Add to both readline history and our History namespace
-    add_history(line.c_str());
     History::add(line);
 
     if (!command_buffer.empty()) command_buffer += '\n';

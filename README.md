@@ -52,6 +52,10 @@ function as a shell command:
 ```janet
 (dax/alias "gs" "git status")
 (dax/set-git-branch false)
+(dax/history-config {:memory-limit 10000
+                     :file-limit 10000
+                     :ignore-duplicates false
+                     :ignore-space false})
 
 (defn greet [name]
   (print "Hello, " name))
@@ -60,6 +64,11 @@ function as a shell command:
 
 Then `greet Sameep` invokes the Janet function. Use
 `(dax/unregister-command "greet")` to remove it.
+
+History is appended as commands are entered and defaults to `~/.dax_history`.
+`dax/history-config` accepts `:file`, `:memory-limit`, `:file-limit`,
+`:ignore-duplicates`, and `:ignore-space`; history is loaded at startup, so
+entries from other Dax sessions appear the next time Dax starts.
 
 Janet 1.42.1 is embedded in the repository under `vendor/janet`; a separate
 Janet installation is not required.

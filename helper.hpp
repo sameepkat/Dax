@@ -1,5 +1,7 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
+#include <cstddef>
+#include <deque>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -16,12 +18,21 @@ void report_command_launch_error(const std::string &command, int error);
 
 
 namespace History{
-  void add(const std::string &line);
+  struct Config {
+    std::string file;
+    size_t memory_limit = 10000;
+    size_t file_limit = 10000;
+    bool ignore_duplicates = false;
+    bool ignore_space = false;
+  };
+  Config config();
+  void configure(const Config &config);
+  bool add(const std::string &line);
   void print();
   void print(int num);
   void clear();
   void remove(int index);
-  const std::vector<std::string>& get_all();
+  const std::deque<std::string>& get_all();
   void load_from_file();
   void save_to_file();
 }
