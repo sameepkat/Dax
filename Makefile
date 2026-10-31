@@ -1,9 +1,11 @@
 CXX = g++
 VERSION ?= development
-CXXFLAGS = -Wall -Wextra -std=c++17 -Ivendor/janet -Ibuild
+CXXFLAGS = -Wall -Wextra -std=c++17 -Ivendor/janet -Ibuild \
+	-Isrc/app -Isrc/shell -Isrc/syntax -Isrc/execution \
+	-Isrc/builtins -Isrc/interactive -Isrc/janet -Isrc/support
 
-SRC = $(wildcard *.cpp)
-OBJ = $(patsubst %.cpp, build/%.o, $(SRC))  # Object files in build/ directory
+SRC = $(shell find src -type f -name '*.cpp' -print | sort)
+OBJ = $(patsubst %.cpp, build/%.o, $(SRC))
 DEP = $(OBJ:.o=.d)
 JANET_OBJ = build/janet.o
 TARGET = dax
@@ -24,11 +26,12 @@ build/version.hpp: FORCE
 	@printf '#pragma once\n#define DAX_VERSION "%s"\n' "$(VERSION)" > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
-build/main.o: build/version.hpp
-build/builtins.o: build/version.hpp
+build/src/app/main.o: build/version.hpp
+build/src/builtins/builtins.o: build/version.hpp
 
 # Rule for generating object files from source files
 build/%.o: %.cpp
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 build/janet.o: vendor/janet/janet.c vendor/janet/janet.h
@@ -43,7 +46,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
 
 clean:
-	rm -f $(TARGET) build/*.o build/*.d
+	rm -f $(TARGET) $(OBJ) $(DEP) $(JANET_OBJ)
 
 -include $(DEP)
 
