@@ -2,7 +2,7 @@
 pkgname=dax-shell
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="A C++ Unix shell with Bash-style scripting and an embedded Janet runtime"
+pkgdesc="Customizable Unix shell with interactive features and Janet scripting"
 arch=('x86_64' 'i686' 'aarch64')
 url="https://github.com/sameepkat/Dax"
 license=('GPL3' 'MIT')

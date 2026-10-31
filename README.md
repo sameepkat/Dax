@@ -1,6 +1,6 @@
 # Dax
 
-Dax is a Unix shell written in C++ with an embedded Janet scripting layer.
+Dax is a customizable Unix shell with an interactive prompt and Janet-powered configuration and scripting.
 
 ![Dax Shell](assets/dax_screenshot_01.png)
 
@@ -15,9 +15,8 @@ Dax is a Unix shell written in C++ with an embedded Janet scripting layer.
 - Git branch prompt and configurable colors
 - Janet configuration, scripts, and registered shell commands
 
-Dax implements a practical subset of common shell behavior; it is not fully
-POSIX or Bash compatible. Bash-specific additions are supported where listed;
-check the differential tests for the current compatibility boundary.
+Dax combines familiar shell syntax with a practical set of Bash-inspired
+features.
 
 ## Build and run
 
