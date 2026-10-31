@@ -1,6 +1,6 @@
 # Maintainer: Sameep Kathayat <sameepsk2@gmail.com>
 pkgname=dax-shell
-pkgver=1.0.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="Customizable Unix shell with interactive features and Janet scripting"
 arch=('x86_64' 'i686' 'aarch64')
