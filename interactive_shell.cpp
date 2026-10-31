@@ -5,10 +5,14 @@
 #include "builtins.hpp"
 #include "helper.hpp"
 #include "janet_runtime.hpp"
+#include "shell_state.hpp"
 #include "tokenizer.hpp"
 #include <algorithm>
 #include <cctype>
 #include <clocale>
+#include <chrono>
+#include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,7 +26,45 @@
 namespace {
 std::vector<std::string> completion_items;
 size_t completion_index = 0;
+std::string history_entry_for_command(const std::string &command,
+                                      bool preserve_newlines) {
+  if (preserve_newlines || command.find_first_of("'\"`") != std::string::npos ||
+      command.find("<<") != std::string::npos ||
+      command.find('#') != std::string::npos)
+    return command;
+  static const std::vector<std::string> compound_tokens = {
+      "if", "then", "elif", "else", "fi", "for", "while", "until",
+      "select", "do", "done", "case", "esac", "function", "{", "}", "(", ")"};
+  for (const auto &token : tokenize(command)) {
+    if (!token.quoted && std::find(compound_tokens.begin(), compound_tokens.end(), token) !=
+                             compound_tokens.end())
+      return command;
+  }
+  std::string flattened;
+  for (size_t i = 0; i < command.size(); ++i) {
+    if (command[i] != '\n') {
+      flattened += command[i];
+      continue;
+    }
+    size_t backslashes = 0;
+    for (size_t end = flattened.size(); end > 0 && flattened[end - 1] == '\\'; --end)
+      ++backslashes;
+    if (backslashes % 2 == 1) {
+      flattened.pop_back();
+      continue;
+    }
+    size_t previous = flattened.find_last_not_of(" \t");
+    const bool separator_already_present = previous != std::string::npos &&
+        std::string(";&|<>").find(flattened[previous]) != std::string::npos;
+    flattened += separator_already_present ? " " : "; ";
+  }
+  return flattened;
+}
+
 bool renderer_started = false;
+bool prompt_timeout_active = false;
+bool prompt_timeout_hit = false;
+std::chrono::steady_clock::time_point prompt_deadline;
 size_t renderer_cursor_row = 0;
 size_t renderer_input_row = 0;
 size_t renderer_input_column = 0;
@@ -51,8 +93,48 @@ char **dax_attempted_completion(const char *text, int start, int) {
     if (preceding_token.find('/') != std::string::npos)
       directory_prefix = preceding_token.substr(0, preceding_token.find_last_of('/') + 1);
   }
+  if (!command_position && !variable_name) {
+    std::istringstream prior_words(command_prefix);
+    std::string command_name;
+    while (prior_words >> command_name) {
+      if (command_name.find('=') == std::string::npos) break;
+      command_name.clear();
+    }
+    if (!command_name.empty()) {
+      auto programmable = shell_programmable_completions(command_name, candidate_prefix);
+      if (programmable) {
+        completion_items = std::move(*programmable);
+        rl_attempted_completion_over = 1;
+        if (completion_items.empty()) return nullptr;
+        rl_completion_append_character = !shell_last_completion_nospace() &&
+            completion_items.size() == 1 &&
+            (completion_items.front().empty() || completion_items.front().back() != '/') ? ' ' : '\0';
+        return rl_completion_matches(word.c_str(), completion_generator);
+      }
+    }
+  }
+  const bool blank_line = command_position && command_prefix.find_first_not_of(" \t\n") == std::string::npos &&
+                          word.empty() && command_boundary == std::string::npos;
+  if (command_position && !variable_name) {
+    const std::string special_key = std::string(1, '\x01') +
+                                    (blank_line ? "empty" : "initial");
+    auto programmable = shell_programmable_completions(special_key, candidate_prefix);
+    if (!programmable && special_key != std::string(1, '\x01') + "default")
+      programmable = shell_programmable_completions(std::string(1, '\x01') + "default",
+                                                    candidate_prefix);
+    if (programmable) {
+      completion_items = std::move(*programmable);
+      rl_attempted_completion_over = 1;
+      if (completion_items.empty()) return nullptr;
+      rl_completion_append_character = !shell_last_completion_nospace() &&
+          completion_items.size() == 1 &&
+          (completion_items.front().empty() || completion_items.front().back() != '/') ? ' ' : '\0';
+      return rl_completion_matches(word.c_str(), completion_generator);
+    }
+  }
   completion_items = shell_completion_candidates(candidate_prefix, command_position,
-                                                  variable_name, directory_prefix);
+                                                  variable_name, directory_prefix,
+                                                  blank_line);
   if (variable_name)
     for (auto &candidate : completion_items) candidate.insert(candidate.begin(), '$');
   if (!completion_items.empty()) {
@@ -309,10 +391,15 @@ void configure_readline() {
 }
 } // namespace
 
-void configure_interactive_readline() { configure_readline(); }
+void configure_interactive_readline() {
+  if (shell_option_enabled("vi")) rl_vi_editing_mode(1, 0);
+  else if (shell_option_enabled("emacs")) rl_emacs_editing_mode(1, 0);
+  configure_readline();
+}
 void reset_interactive_renderer() { renderer_started = false; }
 
 std::string build_interactive_prompt() {
+  if (auto prompt = shell_expand_prompt_variable("PS1")) return *prompt;
   char cwd[1024];
   if (getcwd(cwd, sizeof(cwd)) == nullptr) {
     const std::string color = color_code("prompt");
@@ -340,6 +427,7 @@ std::string build_interactive_prompt() {
 }
 
 std::string build_continuation_prompt() {
+  if (auto prompt = shell_expand_prompt_variable("PS2")) return *prompt;
   const std::string color = color_code("prompt");
   return marked_text(color) + "... " + (color.empty() ? "" : marked_text("\033[0m"));
 }
@@ -358,16 +446,66 @@ void print_job_notifications(bool redraw_line) {
 }
 
 static int readline_job_event() {
+  refresh_shell_terminal_dimensions(STDERR_FILENO,
+                                    shell_state().interactive_shell);
   print_job_notifications(true);
+  if (prompt_timeout_active && std::chrono::steady_clock::now() >= prompt_deadline) {
+    prompt_timeout_active = false;
+    prompt_timeout_hit = true;
+    rl_done = 1;
+  }
   return 0;
+}
+
+static void set_prompt_timeout(bool enabled) {
+  prompt_timeout_active = false;
+  prompt_timeout_hit = false;
+  if (!enabled) return;
+  const auto &state = shell_state();
+  const auto configured = state.vars.find("TMOUT");
+  const char *environment = std::getenv("TMOUT");
+  const std::string value = configured != state.vars.end()
+      ? configured->second : environment ? environment : "";
+  if (value.empty()) return;
+  char *end = nullptr;
+  errno = 0;
+  const double seconds = std::strtod(value.c_str(), &end);
+  if (errno || end == value.c_str() || !end || *end || !std::isfinite(seconds) ||
+      seconds <= 0 || seconds > 2147483.0) return;
+  prompt_deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(seconds));
+  prompt_timeout_active = true;
+}
+
+static void run_prompt_command() {
+  auto &state = shell_state();
+  if (state.unset_vars.count("PROMPT_COMMAND")) return;
+  const auto array = state.arrays.find("PROMPT_COMMAND");
+  if (array != state.arrays.end()) {
+    for (size_t index = 0; index < array->second.size(); ++index) {
+      if (!shell_array_index_is_set("PROMPT_COMMAND", index) ||
+          array->second[index].empty())
+        continue;
+      execute_line(array->second[index]);
+      if (shell_should_exit()) break;
+    }
+    return;
+  }
+  const auto variable = state.vars.find("PROMPT_COMMAND");
+  const char *environment_value = std::getenv("PROMPT_COMMAND");
+  const std::string command = variable != state.vars.end()
+      ? variable->second : environment_value ? environment_value : std::string();
+  if (!command.empty()) execute_line(command);
 }
 
 int run_interactive_shell() {
   std::string line;
   std::string command_buffer;
+  unsigned long long consecutive_eof_count = 0;
 
-  // Load history from file on startup
-  History::load_from_file();
+  // Bash only loads the history list when command history is enabled.
+  if (shell_option_enabled("history")) History::load_from_file();
 
   configure_interactive_readline();
 
@@ -375,24 +513,65 @@ int run_interactive_shell() {
   rl_event_hook = readline_job_event;
 
   while (true) {
+    if (command_buffer.empty()) run_prompt_command();
+    if (shell_should_exit()) break;
     const std::string prompt_str = build_interactive_prompt();
 
     // Use readline for input with arrow key support
     const std::string continuation_prompt = build_continuation_prompt();
     const std::string input_prompt = command_buffer.empty() ? prompt_str : continuation_prompt;
+    set_prompt_timeout(command_buffer.empty());
+    configure_interactive_readline();
     begin_readline_input(prompt_str.c_str());
     reset_interactive_renderer();
     char *input = readline(input_prompt.c_str());
     const bool input_interrupted = finish_readline_input();
+    prompt_timeout_active = false;
+
+    if (prompt_timeout_hit) {
+      prompt_timeout_hit = false;
+      if (input) std::free(input);
+      std::cout << "\r\n";
+      std::cout.flush();
+      break;
+    }
 
     // Handle Ctrl+D (EOF)
     if (!input) {
+      if (command_buffer.empty() && shell_option_enabled("ignoreeof")) {
+        const auto &state = shell_state();
+        const auto configured = state.vars.find("IGNOREEOF");
+        const char *environment = configured == state.vars.end()
+            ? std::getenv("IGNOREEOF") : nullptr;
+        const bool has_limit = configured != state.vars.end() || environment != nullptr;
+        unsigned long long limit = has_limit ? 10 : 0;
+        if (has_limit) {
+          const std::string value = configured != state.vars.end()
+              ? configured->second : environment;
+          if (!value.empty()) {
+            char *end = nullptr;
+            errno = 0;
+            const long long parsed = std::strtoll(value.c_str(), &end, 10);
+            if (!errno && end != value.c_str() && *end == '\0')
+              limit = parsed > 0 ? static_cast<unsigned long long>(parsed) : 0;
+          }
+        }
+        if (consecutive_eof_count < limit) {
+          ++consecutive_eof_count;
+          std::cout << '\n';
+          std::cout.flush();
+          std::cerr << "Use \"" << (shell_state().login_shell ? "logout" : "exit")
+                    << "\" to leave the shell.\n";
+          continue;
+        }
+      }
       std::cout << "\n";
       break;
     }
 
     line = input;
     free(input);
+    consecutive_eof_count = 0;
 
     // The custom Readline renderer leaves the cursor exactly at rl_point;
     // Readline's newline handler does not advance the terminal in this mode.
@@ -404,14 +583,41 @@ int run_interactive_shell() {
     if (input_interrupted)
       command_buffer.clear();
 
+    if (!input_interrupted && shell_histexpand_enabled()) {
+      char *expanded = nullptr;
+      const int expansion_status = history_expand(line.c_str(), &expanded);
+      if (expansion_status < 0) {
+        std::cerr << (expanded ? expanded : "dax: history expansion failed") << '\n';
+        std::free(expanded);
+        continue;
+      }
+      if (expanded && expansion_status > 0) {
+        line = expanded;
+        std::cout << line << '\n';
+        if (expansion_status == 2) {
+          if (shell_option_enabled("history")) History::add(line);
+          std::free(expanded);
+          continue;
+        }
+      }
+      std::free(expanded);
+    }
+
     if (line.empty() && command_buffer.empty())
       continue;
 
-    History::add(line);
-
     if (!command_buffer.empty()) command_buffer += '\n';
     command_buffer += line;
+    if (shell_option_enabled("history") && !shell_state().cmdhist) History::add(line);
     if (shell_input_incomplete(command_buffer)) continue;
+    if (shell_option_enabled("history") && shell_state().cmdhist)
+      History::add(history_entry_for_command(command_buffer,
+                                             shell_state().lithist));
+    if (auto prompt = shell_expand_prompt_variable("PS0")) {
+      for (char ch : *prompt)
+        if (ch != '\x01' && ch != '\x02') std::cout << ch;
+      std::cout.flush();
+    }
     execute_line(command_buffer);
     print_job_notifications();
     command_buffer.clear();
@@ -428,9 +634,10 @@ int run_interactive_shell() {
     //  std::cout << "]\n";
   }
 
-  // Save history to file before exiting
+  // Bash saves the history list on exit only while command history is enabled.
   run_exit_trap();
-  History::save_to_file();
+  if (shell_option_enabled("history"))
+    History::save_to_file(shell_state().histappend);
 
   janet_runtime_stop();
   rl_event_hook = nullptr;

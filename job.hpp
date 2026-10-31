@@ -8,6 +8,10 @@ struct Job {
   int pid;
   std::string command;
   bool stopped = false;
+  bool completed = false;
+  bool status_change_pending = false;
+  bool ignore_hup = false;
+  int status = 0;
 };
 
 #endif

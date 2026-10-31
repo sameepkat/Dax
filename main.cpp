@@ -3,11 +3,12 @@
 #include "interactive_shell.hpp"
 #include "janet_runtime.hpp"
 #include "shell.hpp"
+#include "shell_state.hpp"
 #include <version.hpp>
+#include <clocale>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <unistd.h>
@@ -26,11 +27,16 @@ struct CliInvocation {
   bool force_interactive = false;
   bool has_operands = false;
   bool monitor_option_seen = false;
+  bool histexpand_option_seen = false;
+  bool history_option_seen = false;
   std::string command;
   std::string shell_name = "dax";
   std::string script_path;
   std::string workspace;
   std::vector<std::string> arguments;
+  std::vector<std::pair<std::string, bool>> invocation_shopt_options;
+  bool print_shopt_options = false;
+  bool print_shopt_options_reusable = false;
 };
 
 static void print_usage(std::ostream &out) {
@@ -48,13 +54,14 @@ static void print_usage(std::ostream &out) {
          "  -s                      Read shell commands from standard input\n"
          "  -c COMMAND             Run one Dax shell command\n"
          "  -o OPTION              Enable a shell option; -o no_OPTION disables it\n"
+         "  [-+]O OPTION           Enable or disable a shopt option at startup\n"
          "  --OPTION, --no-OPTION  Enable or disable a shell option\n"
          "  +o OPTION              Disable a shell option; +o no_OPTION enables it\n"
          "  +-OPTION, +-no-OPTION  Disable or enable a shell option\n"
-         "  -a/-b/-C/-e/-f/-m/-n/-u/-v/-x and + forms\n"
+         "  -a/-b/-C/-e/-E/-f/-H/-h/-k/-m/-n/-p/-P/-t/-u/-v/-x and + forms\n"
          "                         POSIX shell option flags\n"
-         "Named options: allexport, notify, noclobber, errexit, pipefail, noglob,\n"
-         "               monitor, noexec, nounset, verbose, xtrace\n\n"
+         "Named options: allexport, notify, noclobber, errexit, errtrace, functrace, pipefail, noglob,\n"
+         "               monitor, noexec, nounset, verbose, xtrace, histexpand, history, hashall, braceexpand, keyword, nolog, physical, privileged, onecmd, ignoreeof, emacs, vi, posix\n\n"
          "Dax supports POSIX-style invocation and these options; this does not\n"
          "claim full POSIX shell-language conformance.\n";
 }
@@ -78,14 +85,22 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
                              : flag == 'b' ? "notify"
                              : flag == 'C' ? "noclobber"
                              : flag == 'e' ? "errexit"
+                             : flag == 'E' ? "errtrace"
+                             : flag == 'T' ? "functrace"
+                             : flag == 'H' ? "histexpand"
+                             : flag == 'k' ? "keyword"
                              : flag == 'f' ? "noglob"
                              : flag == 'm' ? "monitor"
                              : flag == 'n' ? "noexec"
+                             : flag == 'P' ? "physical"
+                             : flag == 'p' ? "privileged"
+                             : flag == 't' ? "onecmd"
                              : flag == 'u' ? "nounset"
                              : flag == 'v' ? "verbose"
                              : flag == 'x' ? "xtrace" : "";
     if (name.empty()) return false;
     if (flag == 'm') invocation.monitor_option_seen = true;
+    if (flag == 'H') invocation.histexpand_option_seen = true;
     return apply_named_cli_option(name, enabled,
                                   invocation.shell_option_seen, error);
   };
@@ -96,6 +111,8 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
       enabled = !enabled;
     }
     if (name == "monitor") invocation.monitor_option_seen = true;
+    if (name == "histexpand") invocation.histexpand_option_seen = true;
+    if (name == "history") invocation.history_option_seen = true;
     return apply_named_cli_option(name, enabled,
                                   invocation.shell_option_seen, error);
   };
@@ -138,6 +155,18 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
         invocation.arguments.emplace_back(argv[i]);
       invocation.has_operands = !invocation.arguments.empty();
       return true;
+    }
+    if (!stop_options && (arg == "-O" || arg == "+O")) {
+      const bool enabled = arg == "-O";
+      if (i + 1 < static_cast<size_t>(argc) && argv[i + 1][0] != '-' &&
+          argv[i + 1][0] != '+') {
+        invocation.invocation_shopt_options.emplace_back(argv[++i], enabled);
+      } else {
+        invocation.print_shopt_options = true;
+        invocation.print_shopt_options_reusable = !enabled;
+      }
+      ++i;
+      continue;
     }
     if (!stop_options && (arg == "-o" || arg == "+o")) {
       const bool default_enabled = arg == "-o";
@@ -251,6 +280,44 @@ static bool parse_cli(int argc, char **argv, CliInvocation &invocation,
   return true;
 }
 
+static bool startup_privileged_requested(int argc, char **argv) {
+  bool privileged = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--" || arg == "--help" || arg == "--version" ||
+        arg == "--script" || arg == "--janet" || arg == "--janet-restricted")
+      break;
+    if ((arg == "-o" || arg == "+o") && i + 1 < argc) {
+      if (std::string(argv[i + 1]) == "privileged") privileged = arg == "-o";
+      ++i;
+      continue;
+    }
+    if (arg == "--privileged" || arg == "--no_privileged" ||
+        arg == "--no-privileged" || arg == "+-privileged" ||
+        arg == "+-no-privileged") {
+      privileged = arg == "--privileged" || arg == "+-no-privileged";
+      continue;
+    }
+    if (arg.size() > 1 && (arg[0] == '-' || arg[0] == '+')) {
+      const bool enable = arg[0] == '-';
+      for (size_t index = 1; index < arg.size(); ++index) {
+        if (arg[index] == 'p') privileged = enable;
+        if (arg[index] == 'c' || arg[index] == 's') return privileged;
+        if (arg[index] == 'o') {
+          std::string name;
+          if (index + 1 < arg.size()) name = arg.substr(index + 1);
+          else if (i + 1 < argc) name = argv[++i];
+          if (name == "privileged") privileged = enable;
+          break;
+        }
+      }
+      continue;
+    }
+    break;
+  }
+  return privileged;
+}
+
 static bool start_interactive_runtime() {
   if (!janet_runtime_start()) return false;
   const char *config_root = std::getenv("XDG_CONFIG_HOME");
@@ -288,6 +355,11 @@ static void run_stdin_commands(std::istream &input) {
 }
 
 int main(int argc, char **argv) {
+  std::setlocale(LC_ALL, "");
+  if (!prepare_shell_startup_privilege(startup_privileged_requested(argc, argv))) {
+    std::cerr << "dax: unable to reset effective user or group ID\n";
+    return 1;
+  }
   CliInvocation invocation;
   std::string cli_error;
   if (!parse_cli(argc, argv, invocation, cli_error)) {
@@ -318,7 +390,23 @@ int main(int argc, char **argv) {
   else if (invocation.mode == CliMode::Stdin && interactive)
     invocation.mode = CliMode::Interactive;
   set_shell_modes(invocation.login, interactive,
-                  invocation.monitor_option_seen);
+                  invocation.monitor_option_seen,
+                  invocation.histexpand_option_seen,
+                  invocation.mode == CliMode::Command,
+                  invocation.mode == CliMode::Stdin,
+                  invocation.command,
+                  invocation.history_option_seen);
+  for (const auto &[option, enabled] : invocation.invocation_shopt_options) {
+    const auto result = handle_builtin({"shopt", enabled ? "-s" : "-u", option});
+    if (!result || *result != 0) return 2;
+  }
+  if (invocation.print_shopt_options) {
+    const auto result = invocation.print_shopt_options_reusable
+        ? handle_builtin({"shopt", "-p"}) : handle_builtin({"shopt"});
+    if (!result || *result != 0) return 2;
+  }
+  if (dax_invocation && !shell_state().ignore_inherited_environment)
+    import_exported_functions();
 
   if (invocation.mode == CliMode::Command)
     set_shell_arguments(invocation.shell_name, invocation.arguments);
@@ -331,8 +419,35 @@ int main(int argc, char **argv) {
                         stdin_requested ? invocation.arguments
                                         : std::vector<std::string>{});
 
+  // Bash reads BASH_ENV in noninteractive shells before the command, script,
+  // or stdin stream. Prefix a bare filename with ./ so the Dax source builtin
+  // cannot search PATH for it, matching Bash's explicit-filename behavior.
+  if (dax_invocation && !interactive &&
+      !shell_state().ignore_inherited_environment) {
+    const char *bash_env = std::getenv("BASH_ENV");
+    if (bash_env && *bash_env && !shell_should_exit()) {
+      std::string startup_file(bash_env);
+      if (startup_file.find('/') == std::string::npos)
+        startup_file = "./" + startup_file;
+      const bool previous_shell_source_mode = shell_state().force_shell_source;
+      shell_state().force_shell_source = true;
+      set_last_status(handle_builtin({"source", startup_file}).value_or(1));
+      shell_state().force_shell_source = previous_shell_source_mode;
+    }
+  }
+
   if (interactive) {
-    if (!start_interactive_runtime()) return 1;
+    if (shell_state().ignore_inherited_environment) {
+      if (!janet_runtime_start()) return 1;
+    } else if (!start_interactive_runtime()) {
+      return 1;
+    }
+  }
+
+  if (dax_invocation && !interactive && shell_should_exit()) {
+    run_exit_trap();
+    janet_runtime_stop();
+    return requested_exit_status();
   }
 
   if (invocation.mode == CliMode::Command) {
@@ -349,9 +464,7 @@ int main(int argc, char **argv) {
       janet_runtime_stop();
       return 127;
     }
-    std::ostringstream source;
-    source << script.rdbuf();
-    execute_line(source.str());
+    run_stdin_commands(script);
     print_job_notifications();
     run_exit_trap();
     janet_runtime_stop();

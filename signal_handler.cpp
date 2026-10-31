@@ -6,12 +6,14 @@
 namespace {
 volatile sig_atomic_t readline_active = 0;
 volatile sig_atomic_t readline_interrupted = 0;
+volatile sig_atomic_t input_sigint = 0;
 const char *readline_primary_prompt = nullptr;
 }
 
 void handle_signal(int signum) {
-  if (signum != SIGINT || !readline_active)
-    return;
+  if (signum != SIGINT) return;
+  input_sigint = 1;
+  if (!readline_active) return;
 
   readline_interrupted = 1;
   if (readline_primary_prompt)
@@ -33,7 +35,14 @@ void begin_readline_input(const char *primary_prompt) {
 bool finish_readline_input() {
   readline_active = 0;
   readline_primary_prompt = nullptr;
-  const bool interrupted = readline_interrupted != 0;
+  const bool interrupted = readline_interrupted != 0 || input_sigint != 0;
   readline_interrupted = 0;
+  input_sigint = 0;
+  return interrupted;
+}
+
+bool consume_input_sigint() {
+  const bool interrupted = input_sigint != 0;
+  input_sigint = 0;
   return interrupted;
 }

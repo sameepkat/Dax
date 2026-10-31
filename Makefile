@@ -25,6 +25,7 @@ build/version.hpp: FORCE
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
 build/main.o: build/version.hpp
+build/builtins.o: build/version.hpp
 
 # Rule for generating object files from source files
 build/%.o: %.cpp

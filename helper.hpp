@@ -28,12 +28,16 @@ namespace History{
   Config config();
   void configure(const Config &config);
   bool add(const std::string &line);
+  bool append_new_to_file(const std::string &filename = {});
+  bool read_new_from_file(const std::string &filename = {});
+  bool read_from_file(const std::string &filename, bool append = true);
+  bool write_to_file(const std::string &filename);
   void print();
   void print(int num);
   void clear();
   void remove(int index);
   const std::deque<std::string>& get_all();
   void load_from_file();
-  void save_to_file();
+  void save_to_file(bool append = true);
 }
 #endif

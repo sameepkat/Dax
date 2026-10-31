@@ -11,6 +11,7 @@ struct ShellToken : std::string {
   size_t source_begin = 0;
   size_t source_end = 0;
   bool quoted = false;
+  bool alias_expansion_enabled = false;
 
   ShellToken() = default;
   ShellToken(const std::string &text, size_t source_line = 1,
