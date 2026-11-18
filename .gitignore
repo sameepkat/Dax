@@ -3,4 +3,8 @@ main
 *.txt
 dax
 docs/
+tests/*
+!tests/history_suggestion.py
+scripts/
+.github/
 tests/

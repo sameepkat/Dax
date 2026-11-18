@@ -62,6 +62,8 @@ std::string history_entry_for_command(const std::string &command,
 }
 
 bool renderer_started = false;
+bool renderer_has_suggestion = false;
+std::string renderer_command_prefix;
 bool prompt_timeout_active = false;
 bool prompt_timeout_hit = false;
 std::chrono::steady_clock::time_point prompt_deadline;
@@ -318,7 +320,14 @@ void dax_redisplay() {
     renderer_started = true;
   }
   const std::string line(rl_line_buffer, static_cast<size_t>(std::max(rl_end, 0)));
-  const auto spans = command_color_spans(line);
+  const std::string full_line = renderer_command_prefix + line;
+  const auto full_spans = command_color_spans(full_line);
+  std::vector<CommandColorSpan> spans;
+  for (const auto &span : full_spans) {
+    if (span.begin < renderer_command_prefix.size()) continue;
+    spans.push_back({span.begin - renderer_command_prefix.size(),
+                     span.end - renderer_command_prefix.size(), span.color});
+  }
   size_t span_index = 0, target_row = 0, target_column = 0;
   bool target_saved = false;
   const size_t point = static_cast<size_t>(std::clamp(rl_point, 0, rl_end));
@@ -355,9 +364,12 @@ void dax_redisplay() {
     i = next;
   }
   const std::string suggestion = current_suggestion();
+  renderer_has_suggestion = !suggestion.empty();
   if (!suggestion.empty()) {
     output += color_code("suggestion");
-    output += suggestion;
+    // Suggestions are part of the displayed line for layout purposes even
+    // though Readline's point remains at the end of the typed prefix.
+    append_display_text(output, suggestion, row, column, width);
     if (colors_enabled()) output += "\033[0m";
   }
   output += "\033[J";
@@ -376,13 +388,46 @@ int accept_suggestion(int count, int key) {
   return 0;
 }
 
+std::string history_search_input;
+int history_search_point = 0;
+int search_history_forward(int count, int key);
+int search_history_backward(int count, int key) {
+  if (rl_last_func != search_history_backward && rl_last_func != search_history_forward) {
+    history_search_input = rl_line_buffer;
+    history_search_point = rl_point;
+  }
+  if (rl_last_func == search_history_backward) rl_last_func = rl_history_search_backward;
+  else if (rl_last_func == search_history_forward) rl_last_func = rl_history_search_forward;
+  return rl_history_search_backward(count, key);
+}
+
+int search_history_forward(int count, int key) {
+  const std::string previous = rl_line_buffer;
+  if (rl_last_func == search_history_backward) rl_last_func = rl_history_search_backward;
+  else if (rl_last_func == search_history_forward) rl_last_func = rl_history_search_forward;
+  else return rl_history_search_forward(count, key);
+  const int result = rl_history_search_forward(count, key);
+  if (previous == rl_line_buffer) {
+    rl_replace_line(history_search_input.c_str(), 0);
+    rl_point = std::min(history_search_point, rl_end);
+    rl_redisplay();
+    return 0;
+  }
+  return result;
+}
+
 void configure_readline() {
   std::setlocale(LC_CTYPE, "");
+  rl_variable_bind("enable-bracketed-paste", "on");
   rl_attempted_completion_function = dax_attempted_completion;
   rl_redisplay_function = dax_redisplay;
   // GNU Readline's menu completion inserts the next candidate on each Tab
   // press instead of printing the full candidate list.
   rl_bind_key('\t', rl_menu_complete);
+  rl_bind_keyseq("\e[A", search_history_backward);
+  rl_bind_keyseq("\eOA", search_history_backward);
+  rl_bind_keyseq("\e[B", search_history_forward);
+  rl_bind_keyseq("\eOB", search_history_forward);
   rl_bind_keyseq("\e[C", accept_suggestion);
   rl_bind_keyseq("\eOC", accept_suggestion);
   rl_bind_keyseq("\e[F", accept_suggestion);
@@ -396,7 +441,7 @@ void configure_interactive_readline() {
   else if (shell_option_enabled("emacs")) rl_emacs_editing_mode(1, 0);
   configure_readline();
 }
-void reset_interactive_renderer() { renderer_started = false; }
+void reset_interactive_renderer() { renderer_started = false; renderer_has_suggestion = false; }
 
 std::string build_interactive_prompt() {
   if (auto prompt = shell_expand_prompt_variable("PS1")) return *prompt;
@@ -440,6 +485,7 @@ void print_job_notifications(bool redraw_line) {
     std::cout << notification << '\n';
   std::cout.flush();
   if (redraw_line) {
+    reset_interactive_renderer();
     rl_on_new_line();
     rl_redisplay();
   }
@@ -520,6 +566,7 @@ int run_interactive_shell() {
     // Use readline for input with arrow key support
     const std::string continuation_prompt = build_continuation_prompt();
     const std::string input_prompt = command_buffer.empty() ? prompt_str : continuation_prompt;
+    renderer_command_prefix = command_buffer.empty() ? "" : command_buffer + '\n';
     set_prompt_timeout(command_buffer.empty());
     configure_interactive_readline();
     begin_readline_input(prompt_str.c_str());
@@ -576,6 +623,7 @@ int run_interactive_shell() {
     // The custom Readline renderer leaves the cursor exactly at rl_point;
     // Readline's newline handler does not advance the terminal in this mode.
     if (!input_interrupted) {
+      if (renderer_has_suggestion) std::cout << "\033[J";
       std::cout << "\r\n";
       std::cout.flush();
     }

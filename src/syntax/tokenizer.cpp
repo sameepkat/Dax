@@ -323,7 +323,7 @@ std::vector<ShellToken> tokenize(const std::string &line) {
                  (!shell_state().interactive_shell ||
                   shell_state().interactive_comments)) {
         const size_t newline = line.find('\n', i);
-        if (newline == std::string::npos) break;
+        if (newline == std::string::npos) { i = line.size(); break; }
         i = newline - 1;
       } else if (c == '\\' && i + 1 < line.size()) {
         if (line[i + 1] == '\n') { ++i; }

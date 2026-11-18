@@ -211,6 +211,20 @@ void execute_line(const std::string &line) {
 }
 
 bool shell_input_incomplete(const std::string &source) {
+  bool single = false, quoted = false, comment = false, escaped = false;
+  bool word_start = true;
+  for (char c : source) {
+    if (comment) { if (c == '\n') { comment = false; word_start = true; } continue; }
+    if (escaped) { escaped = false; if (c != '\n') word_start = false; continue; }
+    if (!single && c == '\\') { escaped = true; continue; }
+    if (!quoted && c == '\'') { single = !single; word_start = false; continue; }
+    if (!single && c == '"') { quoted = !quoted; word_start = false; continue; }
+    if (!single && !quoted && c == '#' && word_start &&
+        (!shell_state().interactive_shell || shell_state().interactive_comments)) { comment = true; continue; }
+    word_start = !single && !quoted && (std::isspace(static_cast<unsigned char>(c)) ||
+                 std::string(";&|()<>").find(c) != std::string::npos);
+  }
+  if (escaped) return true;
   const auto tokens = tokenize(source);
   int if_depth = 0, loop_depth = 0, paren_depth = 0, brace_depth = 0;
   bool command_start = true;
