@@ -67,11 +67,13 @@ int renderer_suggestion_rows = 0;
 int renderer_suggestion_column = 0;
 int renderer_suggestion_end_column = 0;
 int renderer_suggestion_width = 80;
+int renderer_width = 80;
 std::string renderer_command_prefix;
 bool prompt_timeout_active = false;
 bool prompt_timeout_hit = false;
 std::chrono::steady_clock::time_point prompt_deadline;
 size_t renderer_cursor_row = 0;
+size_t renderer_cursor_column = 0;
 size_t renderer_input_row = 0;
 size_t renderer_input_column = 0;
 
@@ -308,6 +310,7 @@ void dax_redisplay() {
   int rows = 0, width = 80;
   rl_get_screen_size(&rows, &width);
   if (width <= 0) width = 80;
+  renderer_width = width;
   int row = 0, column = 0;
   if (renderer_started) {
     append_cursor_command(output, 'A', renderer_cursor_row - renderer_input_row);
@@ -386,6 +389,7 @@ void dax_redisplay() {
   output += '\r';
   append_cursor_command(output, 'C', target_column);
   renderer_cursor_row = target_row;
+  renderer_cursor_column = target_column;
   std::fwrite(output.data(), 1, output.size(), rl_outstream);
   std::fflush(rl_outstream);
 }
@@ -456,6 +460,29 @@ void configure_interactive_readline() {
   configure_readline();
 }
 void reset_interactive_renderer() { renderer_started = false; renderer_has_suggestion = false; }
+
+static void clear_interrupted_input_display() {
+  std::string output;
+  if (renderer_started) {
+    size_t cursor_row = renderer_cursor_row;
+    // Readline echoes ^C at the input cursor. Account for that echo wrapping
+    // before moving back to the beginning of the active prompt.
+    if (renderer_cursor_column + 2 > static_cast<size_t>(renderer_width))
+      ++cursor_row;
+    if (cursor_row > renderer_input_row)
+      append_cursor_command(output, 'A', cursor_row - renderer_input_row);
+    output += '\r';
+    append_cursor_command(output, 'C', renderer_input_column);
+    output += "\033[J";
+  } else {
+    output += '\r';
+  }
+  output += "\r\n";
+  FILE *stream = rl_outstream ? rl_outstream : stdout;
+  std::fwrite(output.data(), 1, output.size(), stream);
+  std::fflush(stream);
+  reset_interactive_renderer();
+}
 
 std::string build_interactive_prompt() {
   if (auto prompt = shell_expand_prompt_variable("PS1")) return *prompt;
@@ -583,7 +610,7 @@ int run_interactive_shell() {
     renderer_command_prefix = command_buffer.empty() ? "" : command_buffer + '\n';
     set_prompt_timeout(command_buffer.empty());
     configure_interactive_readline();
-    begin_readline_input(prompt_str.c_str());
+    begin_readline_input();
     reset_interactive_renderer();
     char *input = readline(input_prompt.c_str());
     const bool input_interrupted = finish_readline_input();
@@ -634,6 +661,11 @@ int run_interactive_shell() {
     free(input);
     consecutive_eof_count = 0;
 
+    if (input_interrupted) {
+      clear_interrupted_input_display();
+      command_buffer.clear();
+    }
+
     // The custom Readline renderer leaves the cursor exactly at rl_point;
     // Readline's newline handler does not advance the terminal in this mode.
     if (!input_interrupted) {
@@ -652,9 +684,6 @@ int run_interactive_shell() {
       std::cout << "\r\n";
       std::cout.flush();
     }
-
-    if (input_interrupted)
-      command_buffer.clear();
 
     if (!input_interrupted && shell_histexpand_enabled()) {
       char *expanded = nullptr;

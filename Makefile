@@ -62,6 +62,8 @@ test: $(TARGET) build/pattern-match-test
 	  POSIXLY_CORRECT=1 ./build/pattern-match-test --posix && \
 	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/shell/pattern_matching.py ./$(TARGET) && \
 	  LC_ALL=C HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" ./$(TARGET) tests/shell/smoke.dax && \
+	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/interactive/interrupt.py ./$(TARGET) && \
+	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/interactive/redraw.py ./$(TARGET) && \
 	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/interactive/history_suggestion.py ./$(TARGET)
 
 install: $(TARGET)

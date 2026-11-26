@@ -1483,7 +1483,7 @@ std::optional<int> run(const std::vector<std::string> &a) {
     if (use_readline) {
       readline_prefill = initial_text;
       rl_startup_hook = initial_text.empty() ? nullptr : insert_readline_prefill;
-      begin_readline_input(nullptr);
+      begin_readline_input();
       FILE *previous_readline_output = rl_outstream;
       rl_outstream = stderr;
       char *edited = readline(prompt.c_str());
