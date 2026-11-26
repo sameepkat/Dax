@@ -1,0 +1,303 @@
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cases=(
+  'true && printf ok'
+  'false && printf wrong'
+  'false || printf recovered'
+  'true || printf wrong'
+  '! false'
+  '! true'
+  'printf start && false || printf recovered'
+  'printf "&& || !"'
+  "DAX_VALUE='one two'; echo \$DAX_VALUE"
+  'echo *.cpp'
+  "echo '*.cpp'"
+  'printf hello | tr a-z A-Z'
+  'set -o pipefail; false | true; echo pipe=$?'
+  'set +o pipefail; false | true; echo pipe=$?'
+  'cat <<< "here string"'
+  'diff <(printf "a\nb\n") <(printf "a\nb\n")'
+  'DAX_ARRAY=(one "two words"); DAX_ARRAY+=(three); for item in "${DAX_ARRAY[@]}"; do echo "<$item>"; done; echo ${#DAX_ARRAY}:${#DAX_ARRAY[@]}:${#DAX_ARRAY[1]}; DAX_ARRAY[4]=five; echo ${DAX_ARRAY[4]}'
+  'DAX_TEXT=abcdef; echo ${DAX_TEXT:1:3}; echo ${DAX_TEXT: -2}; echo ${DAX_TEXT/a/X}; echo ${DAX_TEXT//a/X}'
+  "trap 'echo err:\$?' ERR; false; echo after"
+  "trap 'echo err' ERR; function fail_fn ( ) { false; }; fail_fn"
+  "trap 'echo err' ERR; (false)"
+  "trap 'echo err' ERR; if false; then echo wrong; fi; false | true; echo after"
+  "set -o pipefail; trap 'echo err:\$?' ERR; false | true; echo after"
+  'for outer in a b; do for inner in 1 2; do echo "$outer$inner"; break 2; done; done; echo done'
+  'for outer in a b; do for inner in 1 2; do echo "$outer$inner"; continue 2; done; echo wrong; done'
+  'false; true'
+  '{ printf grouped; }'
+  '(printf grouped) | tr a-z A-Z'
+  '(false) || printf recovered'
+  '(cd /tmp); pwd'
+  'if true; then printf yes; else printf no; fi'
+  'if false; then printf no; elif true; then printf yes; else printf no; fi'
+  'for item in one two; do echo item=$item; done'
+  'while false; do printf no; done; printf done'
+  'until true; do printf no; done; printf done'
+  'case apple in b*) printf wrong ;; a*) printf matched ;; esac'
+  'case other in one|two) printf wrong ;; *) printf fallback ;; esac'
+  'unset DAX_DEFAULT; echo ${DAX_DEFAULT:-fallback}'
+  'DAX_DEFAULT=${DAX_DEFAULT:=assigned}; echo $DAX_DEFAULT'
+  'echo ${#HOME}'
+  'echo $(printf substitution)'
+  'echo `printf legacy-substitution`'
+  'echo "`printf '\''two words'\''`"'
+  "echo \"\$(printf 'two words\\n\\n')\""
+  'echo $(printf $(printf nested))'
+  'echo $(false || printf recovered)'
+  'VALUE=$(false); echo status=$?'
+  $'cat <<EOF\nheredoc text\nEOF'
+  $'cat <<FIRST <<SECOND\nfirst document\nFIRST\nsecond document\nSECOND'
+  $'if true; then\ncat <<EOF\nnested heredoc\nEOF\nfi'
+  $'cat <<\\EOF\n$HOME\nEOF'
+  $'cat <<EOF\n\\$HOME\n\\\\$HOME\nEOF'
+  $'VALUE=expanded; cat <<EOF\n$VALUE\nEOF'
+  $'cat <<EOF\n`printf heredoc-legacy`\nEOF'
+  $'cat <<EOF\n\\`printf not-run\\`\nline\\\ncontinued\nEOF'
+  "cat <<'EOF'
+\$HOME
+EOF"
+  $'cat <<-EOF\n\tstripped tabs\n\tEOF'
+  $'cat <<EOF\n$(printf substitution)\nEOF'
+  'for item in one two three; do echo $item; break; done'
+  'for item in one two three; do if test $item = two; then continue; fi; echo $item; done'
+  'if true; then echo nested; fi | tr a-z A-Z'
+  'for x in a b; do if test $x = a; then echo $x; else echo other; fi; done'
+  'false || { echo recovered; true && echo chained; }'
+  'echo pipeline > "$DAX_ROADMAP_TMP"; cat < "$DAX_ROADMAP_TMP" | tr a-z A-Z'
+  'echo grouped > "$DAX_ROADMAP_TMP"; { cat "$DAX_ROADMAP_TMP"; }'
+  'echo compound > "$DAX_ROADMAP_TMP"; if true; then cat "$DAX_ROADMAP_TMP"; fi'
+  'echo a > "$DAX_ROADMAP_TMP"; echo b >> "$DAX_ROADMAP_TMP"; cat "$DAX_ROADMAP_TMP"'
+  'echo here | cat > "$DAX_ROADMAP_TMP"; cat "$DAX_ROADMAP_TMP"'
+  'function status_fn ( ) { false; }; status_fn; echo function-status=$?'
+  'unset DAX_ALT; echo ${DAX_ALT:+present}; DAX_ALT=yes; echo ${DAX_ALT:+present}'
+  'DAX_EMPTY=; echo ${DAX_EMPTY:-fallback}:${DAX_EMPTY:+alternate}'
+  'unset DAX_ASSIGN; echo ${DAX_ASSIGN:=assigned}:$DAX_ASSIGN'
+  'echo ${DAX_NOT_SET-word}:${DAX_NOT_SET:-colon-word}'
+  'unset DAX_SPACE_DEFAULT; echo ${DAX_SPACE_DEFAULT:-two words}'
+  'unset DAX_UNSET_OP; echo ${DAX_UNSET_OP-default}:${DAX_UNSET_OP+alternate}; DAX_UNSET_OP=; echo ${DAX_UNSET_OP-default}:${DAX_UNSET_OP+alternate}:${DAX_UNSET_OP:-colon-default}:${DAX_UNSET_OP:+colon-alternate}'
+  'unset DAX_SET_OP; echo ${DAX_SET_OP=assigned}:$DAX_SET_OP'
+  'echo DAX_ROADMAP_NO_MATCH_*.missing'
+  'DAX_MIXED=two; echo "prefix-$DAX_MIXED"-suffix'
+  'echo "$(printf "trailing\n\n")"'
+  'DAX_FIELDS="one two"; echo $DAX_FIELDS'
+  'IFS=:; DAX_LIST=":a::b:"; for DAX_ITEM in $DAX_LIST; do echo "<$DAX_ITEM>"; done'
+  'IFS=; DAX_LIST="a b"; for DAX_ITEM in $DAX_LIST; do echo "[$DAX_ITEM]"; done'
+  'IFS=" ,"; DAX_LIST="  a , , b  "; for DAX_ITEM in $DAX_LIST; do echo "{$DAX_ITEM}"; done'
+  'echo "$(printf "two words")"'
+  'for x in one two three; do echo $x; continue; echo skipped; done'
+  'while false; do echo no; done; echo after'
+  'case apple in apple) echo first ;; *) echo fallback ;; esac'
+  'set -e; false && echo wrong; echo after'
+  'set -e; false || echo recovered; echo after'
+  'set -e; false && echo wrong || echo recovered; echo after'
+  'set -e; true && false; echo wrong'
+  'set -e; if false; then echo wrong; fi; echo after'
+  'set -e; ! false; echo after'
+  'set -e; false | true; echo after'
+  'set -e; function fail_fn ( ) { false; }; fail_fn; echo wrong'
+  'set -e; while false; do echo wrong; done; echo after'
+  'set -e; function fail_fn ( ) { false; }; if fail_fn; then echo wrong; fi; echo after'
+  'set -e; function fail_fn ( ) { false; }; while fail_fn; do echo wrong; done; echo after'
+  'set -e; function fail_fn ( ) { false; }; ! fail_fn; echo after'
+  'set -e; function fail_fn ( ) { false; }; fail_fn || echo recovered; echo after'
+  'trap "echo signal" USR1; kill -USR1 $$; echo after'
+  'trap "echo exit" EXIT; echo body'
+  'sh -c "printf background" > "$DAX_ROADMAP_TMP" & wait; cat "$DAX_ROADMAP_TMP"'
+  'function dax_lookup ( ) { true; }; command -v echo dax_lookup ls'
+  'command -V echo; test -n value; echo test=$?'
+  'sleep 0.2 & jobs; wait; echo wait=$?'
+  'printf first; sleep 0.05 & wait; printf last'
+  'sleep 0.05 & disown %1; echo disown=$?'
+  'sleep 0.05 & wait %1; echo wait=$?'
+  'sh -c "exit 3" & sh -c "exit 4" & wait; echo wait=$?'
+  'wait %99; echo wait=$?'
+  'wait; echo wait-empty=$?'
+  '[[ -n value ]]; echo nonempty=$?'
+  '[[ -z "" ]]; echo empty=$?'
+  'DAX_TEST=value; [[ $DAX_TEST == v* ]]; echo pattern=$?'
+  'DAX_TEST=value; [[ $DAX_TEST == "v*" ]]; echo quoted-pattern=$?'
+  'DAX_TEST=value; [[ $DAX_TEST =~ ^val ]]; echo regex=$?'
+  'DAX_TEST=abc123; [[ $DAX_TEST =~ ([a-z]+)([0-9]+) ]]; echo regex-captures=${BASH_REMATCH[0]}:${BASH_REMATCH[1]}:${BASH_REMATCH[2]}'
+  'DAX_TEST="a+b"; [[ $DAX_TEST =~ "a+b" ]]; echo quoted-regex=$?'
+  'DAX_TEST=abc; [[ $DAX_TEST =~ (a) ]]; [[ $DAX_TEST =~ z+ ]]; echo cleared=${#BASH_REMATCH[@]}'
+  'DAX_TEST=abc123; [[ $DAX_TEST =~ [[:alpha:]]{3}[[:digit:]]{3} ]]; echo ere-class=$?'
+  'DAX_TEST=b; [[ $DAX_TEST =~ ((a)?b) ]]; echo optional=${BASH_REMATCH[0]}:${BASH_REMATCH[1]}:${BASH_REMATCH[2]}'
+  'DAX_TEST=abc; [[ $DAX_TEST =~ ^a && $DAX_TEST =~ c$ ]]; echo regex-chain=$?'
+  '[[ 10 -gt 2 && ! -e /definitely/not/a/dax-test-file ]]; echo logic=$?'
+  'DAX_TEST_NUM=2; [[ DAX_TEST_NUM+3 -eq 5 ]]; echo arithmetic-condition=$?'
+  'echo bits=$(( (6 & 3) | (1 << 3) )) ternary=$((3 > 2 ? 7 : 9))'
+  'DAX_ARITH=4; echo assigned=$((DAX_ARITH=7)); echo value=$DAX_ARITH'
+  'DAX_ARITH=4; echo post=$((DAX_ARITH++)) current=$DAX_ARITH'
+  'DAX_ARITH=0; ((DAX_ARITH ? (DAX_ARITH=1) : (DAX_ARITH=2))); echo ternary=$DAX_ARITH'
+  'for ((i=0; i<6; i+=2)); do echo $i; done'
+  'DAX_ARITH_ARRAY=(2 3); ((DAX_ARITH_ARRAY[-1]++)); echo negative-index=${DAX_ARITH_ARRAY[1]}'
+  'declare -A DAX_ASSOC; DAX_ASSOC[foo]=bar; DAX_ASSOC["two words"]=qux; echo ${DAX_ASSOC[foo]}:${DAX_ASSOC["two words"]}:${#DAX_ASSOC[@]}'
+  'declare -A DAX_ASSOC; DAX_ASSOC[x]=one; DAX_ASSOC[y]=two; echo "${!DAX_ASSOC[@]}" | tr " " "\n" | sort'
+  'declare -A DAX_ASSOC; DAX_ASSOC[x]=value; echo ${DAX_ASSOC[x]/val/X}'
+  'declare -A DAX_ASSOC; DAX_ASSOC[x]=value; unset "DAX_ASSOC[x]"; echo "<${DAX_ASSOC[x]}>"'
+  '[[ abc < bcd && bcd > abc ]]; echo ordering=$?'
+  '[[ -d /tmp && -f /etc/passwd ]]; echo files=$?'
+  'DAX_TEST="two words"; if [[ $DAX_TEST == "two words" ]]; then echo spaced; fi'
+  '[[ ( -n value && value == value ) || -z value ]]; echo grouped=$?'
+  'unset DAX_SHORT; [[ -n x || ${DAX_SHORT:=set} == set ]]; echo or-skipped=${DAX_SHORT-unset}'
+  'unset DAX_SHORT; [[ -z x && ${DAX_SHORT:=set} == set ]]; echo and-skipped=${DAX_SHORT-unset}'
+  '[[ -n x || ${DAX_SHORT:?must-not-expand} ]]; echo skipped-default-status=$?'
+  '[[ -z x && ${DAX_SHORT:?must-not-expand} ]]; echo skipped-error-status=$?'
+  'rm -f "$DAX_ROADMAP_TMP"; [[ -n x || $(touch "$DAX_ROADMAP_TMP") ]]; test -e "$DAX_ROADMAP_TMP"; echo skipped-substitution=$?'
+  '(( 2 + 3 * 4 == 14 )); echo arithmetic=$?'
+  '(( DAX_ARITH=2, DAX_ARITH += 3 )); echo value=$DAX_ARITH'
+  '(( DAX_ARITH=1 )); (( DAX_ARITH++ )); echo post=$DAX_ARITH'
+  'DAX_ARITH=1; (( DAX_ARITH || (DAX_ARITH=4) )); echo short=$DAX_ARITH'
+  'for ((i=0; i<4; i++)); do echo $i; done'
+  'for ((i=0; i<5; i++)); do if ((i == 2)); then continue; fi; echo $i; done'
+  'for ((i=0; i<5; i++)); do if ((i == 2)); then break; fi; echo $i; done'
+  'echo power=$((2 ** 3 ** 2)) unary=$((-2 ** 2)) base=$((16#ff))'
+  'DAX_ARITH=0; ((DAX_ARITH)); echo arithmetic-status=$?'
+  'DAX_ARITH_ARRAY=(2 3); (( DAX_ARITH_ARRAY[0]++ )); (( DAX_ARITH_ARRAY[1] = DAX_ARITH_ARRAY[0] * 4 )); echo array=${DAX_ARITH_ARRAY[0]}:${DAX_ARITH_ARRAY[1]}'
+  'DAX_ARITH_ARRAY=(2); (( DAX_ARITH_ARRAY[3]=5 )); echo sparse=${DAX_ARITH_ARRAY[3]}'
+  'echo overflow=$((9223372036854775807 + 1))'
+  'declare -A DAX_ASSOC; DAX_ASSOC[x]=global; function DAX_ASSOC_FN ( ) { local -A DAX_ASSOC; DAX_ASSOC[x]=local; echo inside=${DAX_ASSOC[x]}; }; DAX_ASSOC_FN; echo outside=${DAX_ASSOC[x]}'
+  'declare -A DAX_ASSOC; DAX_ASSOC[x]=global; function DAX_ASSOC_FN ( ) { local -A DAX_ASSOC; echo inside=${#DAX_ASSOC[@]}; DAX_ASSOC[x]=local; }; DAX_ASSOC_FN; echo outside=${DAX_ASSOC[x]}'
+  'declare -A DAX_ASSOC; echo ${DAX_ASSOC[x]-fallback}; echo ${DAX_ASSOC[x]:+present}; echo ${DAX_ASSOC[x]:=assigned}; echo ${DAX_ASSOC[x]}'
+  'declare -A DAX_ASSOC=([alpha]=one ["two words"]="three four"); echo ${DAX_ASSOC[alpha]}:${DAX_ASSOC["two words"]}:${#DAX_ASSOC[@]}'
+  'declare -A DAX_ASSOC; DAX_ASSOC=([x]=one [y]=two); DAX_ASSOC+=([x]=changed [z]=three); echo ${DAX_ASSOC[x]}:${DAX_ASSOC[y]}:${DAX_ASSOC[z]}:${#DAX_ASSOC[@]}'
+  'DAX_VALUE="two words"; declare -A DAX_ASSOC=([key]=$DAX_VALUE); echo "<${DAX_ASSOC[key]}>"'
+  'declare -A DAX_ASSOC=([x]=global); function DAX_ASSOC_FN ( ) { local -A DAX_ASSOC=([x]=local [y]="two words"); echo inside=${DAX_ASSOC[x]}:${DAX_ASSOC[y]}; }; DAX_ASSOC_FN; echo outside=${DAX_ASSOC[x]}:${#DAX_ASSOC[@]}'
+  'DAX_INDEXED=(one); echo ${DAX_INDEXED[2]-fallback}; echo ${DAX_INDEXED[2]:=assigned}; echo ${DAX_INDEXED[2]}'
+  'DAX_SLICE=(zero one two three); echo slice=${DAX_SLICE[@]:1:2}; echo negative=${DAX_SLICE[@]: -2}; echo negative-length=${DAX_SLICE[@]:0:-1}'
+  'DAX_SLICE=(zero one two three); printf "quoted-slice=[%s]\n" "${DAX_SLICE[@]:1:2}"'
+  'DAX_SLICE=(zero one two three); echo star-slice=${DAX_SLICE[*]:1:2}; DAX_SLICE[1]=abcdef; echo element-slice=${DAX_SLICE[1]:1:3}'
+  'DAX_NEGATIVE=(zero one); echo negative-index=${DAX_NEGATIVE[-1]} length=${#DAX_NEGATIVE[-1]}'
+  'DAX_WORDS=(a "two words"); IFS=:; printf "[%s]\n" ${DAX_WORDS[@]}'
+  'set -- a b; echo negative-positional=${@: -1}; printf "positional-slice=[%s]\n" "${@:0:2}"'
+  'set -- a "two words"; IFS=:; printf "unbraced-positional=[%s]\n" $@'
+  'DAX_EMPTY_ARRAY=(); set -- ${DAX_EMPTY_ARRAY[*]}; echo empty-star-count=$#; set --; set -- $@; echo empty-positional-count=$#'
+  'set --; set -- "$@"; echo quoted-empty-positional-count=$#; DAX_EMPTY_ARRAY=(); set -- "${DAX_EMPTY_ARRAY[@]}"; echo quoted-empty-array-count=$#'
+  'declare -A DAX_EMPTY_ASSOC=(); set -- ${DAX_EMPTY_ASSOC[@]}; echo empty-assoc-count=$#'
+  'DAX_EMPTY_KEYS=(); set -- ${!DAX_EMPTY_KEYS[@]}; echo empty-index-key-count=$#'
+  'DAX_TRANSFORM="hello world"; echo ${DAX_TRANSFORM^}:${DAX_TRANSFORM^^}:${DAX_TRANSFORM,}:${DAX_TRANSFORM,,}:${DAX_TRANSFORM^^[aeiou]}'
+  'DAX_TRANSFORM="a b'"'"'c"; echo ${DAX_TRANSFORM@Q}'
+  'DAX_TRANSFORM_ARRAY=(hello "two words"); echo "${DAX_TRANSFORM_ARRAY[@]^^}"'
+  'DAX_TRANSFORM_ARRAY=(a "b c"); echo "${DAX_TRANSFORM_ARRAY[@]@Q}"'
+  'DAX_TRANSFORM=banana; echo ${DAX_TRANSFORM^a}:${DAX_TRANSFORM^b}:${DAX_TRANSFORM^^a}'
+  'DAX_TRANSFORM=BANANA; echo ${DAX_TRANSFORM,}:${DAX_TRANSFORM,,A}'
+  'mapfile -t DAX_LINES < <(printf "alpha\nbeta\n"); echo ${DAX_LINES[0]}:${DAX_LINES[1]}:${#DAX_LINES[@]}'
+  'mapfile -d : -t -s 1 -n 2 -O 2 DAX_LINES < <(printf "skip:a:b:c"); echo ${DAX_LINES[2]}:${DAX_LINES[3]}'
+  'mapfile DAX_LINES < <(printf "x\n"); echo ${#DAX_LINES[0]}; mapfile -t DAX_LINES < <(printf "x\n"); echo ${#DAX_LINES[0]}'
+  'function DAX_MAPFILE_CB ( ) { echo "callback=$1:$2"; }; mapfile -t -C DAX_MAPFILE_CB -c 2 DAX_LINES < <(printf "a\nb\nc\n"); echo end=${DAX_LINES[2]}'
+  'mapfile -d "" -t DAX_LINES < <(env printf '\''a\0b\0'\''); echo nul=${DAX_LINES[0]}:${DAX_LINES[1]}'
+  'function DAX_MAPFILE_CB ( ) { echo "callback=$1:$2"; }; mapfile -t -C DAX_MAPFILE_CB -c 1 DAX_LINES < <(printf "a'"'"'b\n"); echo quoted=${DAX_LINES[0]}'
+  'printf "<%s>\n" a\ b'
+  'printf "<%s>\n" \*'
+  'printf "<%s>\n" "a\"b"'
+  'printf "<%s>\n" "a\\b"'
+)
+
+cases+=(
+  'echo pre{one,two}post'
+  'echo {1..4} {05..01..2} {a..e..2}'
+  'echo {x,{y,z}}{1,2}'
+  'echo {,middle,} "{quoted,brace}"'
+  'echo {no-expansion}'
+  'echo \{left,right\}'
+  'DAX_BRACE_WORD=value; echo {$DAX_BRACE_WORD,other}'
+  'unset DAX_BRACE_UNSET; echo ${DAX_BRACE_UNSET:-{left,right}}'
+  'echo {z..v} {1..3..-1} {1..3..0}'
+  'echo $(echo {command,substitution})'
+  'printf "<%s>\\n" pre{one,two}post'
+  'printf "%s:%s\\n" first second third'
+  'printf "%%" unused'
+  'printf "[%5s][%-5s][%.3s]\\n" abc def ghijk'
+  'printf "%d %i %u %o %x %X\\n" 25 16 -1 8 255 255'
+  'printf "%b" "one\\n two\\t"'
+  'printf "%q\\n" "hello world"'
+  'printf "%*.*f\\n" 8 2 3.14159'
+  'printf "abc%nX" DAX_PRINTF_COUNT; echo "|$DAX_PRINTF_COUNT"'
+  'printf -v DAX_PRINTF_VALUE "%04d:%s" 7 ok; echo "<$DAX_PRINTF_VALUE>"'
+  'printf "line\\n%s\\n" value'
+  'printf "<%5b>\\n" "x y"'
+  'printf "%(%Y-%m-%d)T\\n" 0'
+  'printf "%d\\n" nope'
+  'printf "%bX" "hi\\cignored"'
+  'DAX_INDIRECT=DAX_TARGET; DAX_TARGET=resolved; echo ${!DAX_INDIRECT}'
+  'DAX_PREFIX_A=one; DAX_PREFIX_B=two; echo ${!DAX_PREFIX*}'
+  'DAX_PREFIX_A=one; DAX_PREFIX_B=two; printf "<%s>\\n" "${!DAX_PREFIX@}"'
+  'DAX_INDEXED=(a b c); echo ${!DAX_INDEXED[@]}; echo "${!DAX_INDEXED[*]}"'
+  'declare -A DAX_KEYS=([red]=one [blue]=two); echo ${!DAX_KEYS[@]}'
+  'sleep 0.05 & [[ $! =~ ^[0-9]+$ ]]; echo last-background-pid=$?; wait'
+  $'shopt -s extglob\ntouch "$DAX_ROADMAP_TMP"/ext-a.txt "$DAX_ROADMAP_TMP"/ext-b.log "$DAX_ROADMAP_TMP"/ext-c.txt\necho "$DAX_ROADMAP_TMP"/ext-@(a|c).*\nDAX_EXT=foobar; [[ $DAX_EXT == foo@(bar|baz) ]]; echo conditional=$?\ncase $DAX_EXT in foo@(bar|baz)) echo case=yes ;; *) echo case=no ;; esac\necho ${DAX_EXT##foo@(bar|baz)}\nshopt -q extglob; echo shopt=$?'
+  $'shopt -s extglob\n[[ x == @(x|y) ]]; echo exact=$?\n[[ x == ?(x) ]]; echo optional=$?\n[[ xxx == *(x) ]]; echo zero-more=$?\n[[ xxx == +(x) ]]; echo one-more=$?\n[[ y == !(x) ]]; echo negative=$?'
+  $'rm -rf "${DAX_ROADMAP_TMP}.dir/glob-fixture"; mkdir -p "${DAX_ROADMAP_TMP}.dir/glob-fixture"; touch "${DAX_ROADMAP_TMP}.dir/glob-fixture/.hidden" "${DAX_ROADMAP_TMP}.dir/glob-fixture/Case.txt" "${DAX_ROADMAP_TMP}.dir/glob-fixture/visible"\nshopt -s nullglob; set -- "${DAX_ROADMAP_TMP}.dir/glob-fixture"/missing-*.none; echo nullglob=$#; shopt -u nullglob\nshopt -s dotglob; echo "${DAX_ROADMAP_TMP}.dir/glob-fixture"/*; shopt -u dotglob\nshopt -s nocaseglob; echo "${DAX_ROADMAP_TMP}.dir/glob-fixture"/case.*; shopt -u nocaseglob\nshopt -s nocasematch; [[ FOO == foo ]]; echo nocasematch=$?; case foo in FOO) echo nocase-case=yes ;; esac; shopt -u nocasematch\nmkdir -p "${DAX_ROADMAP_TMP}.dir/glob-fixture/nested/deeper"; touch "${DAX_ROADMAP_TMP}.dir/glob-fixture/root.txt" "${DAX_ROADMAP_TMP}.dir/glob-fixture/nested/one.txt" "${DAX_ROADMAP_TMP}.dir/glob-fixture/nested/deeper/two.txt"; shopt -s globstar; echo "${DAX_ROADMAP_TMP}.dir/glob-fixture"/**/*.txt; shopt -u globstar'
+  $'shopt -s failglob\necho /tmp/dax_compat_no_match_*.missing\necho failglob-status=$?'
+  'printf "2\n" | select color in red green; do echo "selected=$color reply=$REPLY"; break; done'
+  'printf "x\n" | select color in red green; do echo "invalid=<$color> reply=$REPLY"; break; done'
+  'printf "\n2\n" | select color in red green; do echo "blank-selected=$color"; break; done'
+  'PS3="Choose: "; set -- one two; printf "2\n" | select item; do echo "default-list=$item reply=$REPLY"; break; done'
+  'printf "%s\n" "\\2" | select color in red green; do echo "escaped-reply=$REPLY selected=$color"; break; done'
+  'printf " 2 \n" | select color in red green; do echo "spaced-reply=<$REPLY> selected=$color"; break; done'
+  $'echo line=$LINENO\necho line=$LINENO\nfunction DAX_LINE_FN ( ) {\n  echo function-line=$LINENO\n}\nDAX_LINE_FN'
+  'function DAX_INNER ( ) { echo "stack=${FUNCNAME[*]}:${BASH_LINENO[*]}"; }; function DAX_OUTER ( ) { DAX_INNER; }; DAX_OUTER'
+  'false | true; echo pipeline-status=${PIPESTATUS[*]}'
+  'sh -c "exit 3" | sh -c "exit 7"; echo pipeline-status=${PIPESTATUS[*]} aggregate=$?'
+  'sh -c "exit 4" | sh -c "exit 7" | true; echo pipeline-status=${PIPESTATUS[*]}; set -o pipefail; sh -c "exit 4" | sh -c "exit 7" | true; echo pipefail-status=$?'
+  'false; echo command-status=${PIPESTATUS[*]}'
+  'time -p true; echo timed-status=$?'
+  'time -p sh -c "exit 7"; echo timed-failure-status=$?'
+  'time -p cd /tmp >/dev/null; pwd'
+  'time -p printf x | tr x y; echo timed-pipeline-status=$?'
+  'TIMEFORMAT="timing:%3R:%3U:%3S:%P"; time true; echo custom-time-status=$?'
+  '! time -p false; echo negated-time-status=$?'
+  'coproc DAX_WORKER { printf "named coproc\\n"; }; read -r -u "${DAX_WORKER[0]}" line; wait "$DAX_WORKER_PID"; echo result=$line status=$?'
+  'coproc { cat; }; printf "default coproc\\n" >&"${COPROC[1]}"; exec {COPROC[1]}>&-; read -r -u "${COPROC[0]}" line; wait "$COPROC_PID"; echo result=$line status=$?'
+  'printf "%s\n" '\''function DAX_INNER_SOURCE ( ) { echo "stack=${FUNCNAME[*]}:${BASH_SOURCE[*]}:${BASH_LINENO[*]}"; }'\'' '\''function DAX_OUTER_SOURCE ( ) { DAX_INNER_SOURCE; }'\'' '\''DAX_OUTER_SOURCE'\'' > "$DAX_ROADMAP_TMP"; source "$DAX_ROADMAP_TMP"'
+  'printf "%s\n" '\''echo source-stack=${FUNCNAME[*]}:${BASH_SOURCE[*]}:${BASH_LINENO[*]}'\'' > "$DAX_ROADMAP_TMP"; source "$DAX_ROADMAP_TMP"'
+  'printf "%s\n" '\''return 7'\'' '\''echo skipped'\'' > "$DAX_ROADMAP_TMP"; source "$DAX_ROADMAP_TMP"; echo source-status=$?; echo caller-continued'
+)
+
+for command in "${cases[@]}"; do
+  set +e
+  bash_output=$(DAX_ROADMAP_TMP="$tmp/out" bash --noprofile --norc -c "$command" 2>&1)
+  bash_status=$?
+  dax_output=$(DAX_ROADMAP_TMP="$tmp/out" "$root/dax" -c "$command" bash 2>&1)
+  dax_status=$?
+  set -e
+  # Bash -c suppresses Dax's start line; jobs output also pads the status differently.
+  if [[ $command == *' & '* ]]; then
+    dax_output=$(printf '%s\n' "$dax_output" | \
+      awk '{ if (sub(/\[[0-9]+\] [0-9]+$/, "")) printf "%s", $0; else print }' | \
+      sed -E 's/^\[[0-9]+\][+ -][[:space:]]*Running[[:space:]]+/Running /')
+  fi
+  bash_output=$(sed -E \
+    -e 's/^bash: line [0-9]+: //' \
+    -e 's/^\[[0-9]+\][+ -][[:space:]]*Running[[:space:]]+/Running /' \
+    < <(printf '%s\n' "$bash_output"))
+  dax_output=$(sed -E '/^dax: line [0-9]+, column [0-9]+: word expansion failed$/d' \
+    < <(printf '%s\n' "$dax_output"))
+  if [[ $command == *time* ]]; then
+    bash_output=$(sed -E -e 's/(real|user|sys)[[:space:]]+[0-9]+([.][0-9]+)?$//' -e '/^$/d' \
+      < <(printf '%s\n' "$bash_output"))
+    dax_output=$(sed -E -e 's/(real|user|sys)[[:space:]]+[0-9]+([.][0-9]+)?$//' -e '/^$/d' \
+      < <(printf '%s\n' "$dax_output"))
+    bash_output=$(sed -E '/^timing:[0-9.]+:[0-9.]+:[0-9.]+:[0-9.]+$/d' \
+      < <(printf '%s\n' "$bash_output"))
+    dax_output=$(sed -E '/^timing:[0-9.]+:[0-9.]+:[0-9.]+:[0-9.]+$/d' \
+      < <(printf '%s\n' "$dax_output"))
+  fi
+  if [[ $command == *'shopt -s failglob'* ]]; then
+    dax_output=$(sed -E -e 's/^dax: //' -e '/word expansion failed/d' \
+      < <(printf '%s\n' "$dax_output"))
+  fi
+  if [[ $bash_output != "$dax_output" || $bash_status -ne $dax_status ]]; then
+    printf 'Bash mismatch for: %s\nBash: status=%s output=<%s>\nDax: status=%s output=<%s>\n' \
+      "$command" "$bash_status" "$bash_output" "$dax_status" "$dax_output" >&2
+    exit 1
+  fi
+done
+
+printf 'Bash differential checks passed (%s cases)\n' "${#cases[@]}"

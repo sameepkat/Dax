@@ -26,6 +26,21 @@ source tree and linked into Dax. On macOS and FreeBSD, install GNU Make and
 run `gmake` in place of `make`. Set `CC` and `CXX` to select compilers; run
 `make clean` before changing the compiler or build flags.
 
+## Tests
+
+Run `make test` (or `gmake test` on macOS and FreeBSD). It builds Dax and
+runs the shell integration, Bash and POSIX comparison, and interactive terminal
+tests. Python 3, Bash 4.4 or newer, and standard Unix utilities are required; the POSIX
+comparison uses dash or BusyBox when available and reports a skip otherwise.
+Linux-only restricted Janet checks are skipped on other platforms.
+
+Shell tests live in `tests/shell/` and can be run with `./dax` followed by
+the `.dax` test path. The pattern comparison can be run with
+`python3 tests/shell/pattern_matching.py ./dax`. Interactive tests live in
+`tests/interactive/` and run with `python3 tests/interactive/<test>.py ./dax`.
+The matcher unit test can be run with `make build/pattern-match-test` followed
+by `./build/pattern-match-test`.
+
 ```sh
 make
 ./dax

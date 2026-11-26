@@ -22,7 +22,7 @@
 #include <functional>
 #include <iomanip>
 #include <fcntl.h>
-#include <fnmatch.h>
+#include "pattern_match.hpp"
 #include <map>
 #include <optional>
 #include <regex.h>
@@ -729,15 +729,15 @@ int ConditionalNode::execute() {
       }
     } else if (op == "=" || op == "==") {
       result = (has_active_pattern || shell_state().nocasematch)
-                   ? fnmatch(glob_right.c_str(), first.c_str(),
-                             FNM_EXTMATCH |
-                             (shell_state().nocasematch ? FNM_CASEFOLD : 0)) == 0
+                   ? dax_pattern_match(glob_right.c_str(), first.c_str(),
+                             DAX_PATTERN_EXTENDED |
+                             (shell_state().nocasematch ? DAX_PATTERN_CASEFOLD : 0)) == 0
                    : first == right;
     } else if (op == "!=") {
       result = (has_active_pattern || shell_state().nocasematch)
-                   ? fnmatch(glob_right.c_str(), first.c_str(),
-                             FNM_EXTMATCH |
-                             (shell_state().nocasematch ? FNM_CASEFOLD : 0)) != 0
+                   ? dax_pattern_match(glob_right.c_str(), first.c_str(),
+                             DAX_PATTERN_EXTENDED |
+                             (shell_state().nocasematch ? DAX_PATTERN_CASEFOLD : 0)) != 0
                    : first != right;
     } else if (op == "<") result = std::strcoll(first.c_str(), right.c_str()) < 0;
     else if (op == ">") result = std::strcoll(first.c_str(), right.c_str()) > 0;
@@ -2366,9 +2366,9 @@ int CaseNode::execute() {
         expand_words(expanded_patterns, WordExpansionMode::Pattern);
         if (!word_expansion_succeeded()) return 1;
         for (const auto &pattern : expanded_patterns) {
-          if (fnmatch(pattern.c_str(), matched_value.c_str(),
-                      (shell_state().extglob ? FNM_EXTMATCH : 0) |
-                      (shell_state().nocasematch ? FNM_CASEFOLD : 0)) == 0) {
+          if (dax_pattern_match(pattern.c_str(), matched_value.c_str(),
+                      (shell_state().extglob ? DAX_PATTERN_EXTENDED : 0) |
+                      (shell_state().nocasematch ? DAX_PATTERN_CASEFOLD : 0)) == 0) {
             clause_matches = true;
             break;
           }

@@ -3,11 +3,10 @@ main
 *.txt
 dax
 docs/
-tests/*
-!tests/history_suggestion.py
+__pycache__/
+*.pyc
 scripts/
 .github/*
 !.github/workflows/
 .github/workflows/*
 !.github/workflows/portable-build.yml
-tests/

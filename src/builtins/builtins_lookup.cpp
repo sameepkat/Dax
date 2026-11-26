@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fnmatch.h>
+#include "pattern_match.hpp"
 #include <fstream>
 #include <grp.h>
 #include <glob.h>
@@ -658,7 +658,7 @@ std::optional<int> run_lookup_builtin(const std::vector<std::string> &a,
       const std::string pattern = invert ? filter_pattern.substr(1) : filter_pattern;
       candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
           [&](const std::string &candidate) {
-            const bool matched = fnmatch(pattern.c_str(), candidate.c_str(), 0) == 0;
+            const bool matched = dax_pattern_match(pattern.c_str(), candidate.c_str(), 0) == 0;
             return invert ? !matched : matched;
           }), candidates.end());
     }

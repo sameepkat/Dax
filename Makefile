@@ -52,6 +52,18 @@ build/janet.o: vendor/janet/janet.c vendor/janet/janet.h
 	$(CC) $(DAX_INCLUDES) $(CPPFLAGS) $(CFLAGS) -w -std=c99 -fPIC -c vendor/janet/janet.c -o $@
 
 # Install target
+build/pattern-match-test: tests/unit/pattern_match.cpp src/support/pattern_match.cpp src/support/pattern_match.hpp
+	@mkdir -p build
+	$(CXX) $(DAX_INCLUDES) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/unit/pattern_match.cpp src/support/pattern_match.cpp $(LDLIBS)
+
+test: $(TARGET) build/pattern-match-test
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+	  ./build/pattern-match-test && \
+	  POSIXLY_CORRECT=1 ./build/pattern-match-test --posix && \
+	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/shell/pattern_matching.py ./$(TARGET) && \
+	  LC_ALL=C HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" ./$(TARGET) tests/shell/smoke.dax && \
+	  HOME="$$tmp" XDG_CONFIG_HOME="$$tmp/config" python3 tests/interactive/history_suggestion.py ./$(TARGET)
+
 install: $(TARGET)
 	mkdir -p $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
@@ -64,8 +76,9 @@ clean:
 	rm -f $(TARGET) $(OBJ) $(DEP) $(JANET_OBJ)
 	rm -rf build/readline build/include/readline
 	rm -f build/link-libs build/link-libs.tmp
+	rm -f build/pattern-match-test
 
 -include $(DEP)
 
-.PHONY: clean install uninstall FORCE
+.PHONY: clean install uninstall test FORCE
 FORCE:

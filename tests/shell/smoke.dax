@@ -1,0 +1,720 @@
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cat > "$tmp/source.dax" <<'SOURCE'
+export DAX_TEST_SOURCE_VALUE=from-source
+function sourced ( ) {
+  echo sourced:$1
+}
+SOURCE
+printf '%s\n' 'read from input' > "$tmp/input.txt"
+printf '%s\n' 'one two three' > "$tmp/fields.txt"
+touch "$tmp/alpha.txt" "$tmp/beta.txt"
+
+cat > "$tmp/live-source.janet" <<'JANET'
+(dax/setenv "DAX_LIVE_JANET_VALUE" "loaded")
+(dax/alias "dax_live_janet_alias" "echo live-janet-alias")
+(dax/on :startup (fn [] (dax/setenv "DAX_LIVE_JANET_HOOK" "ran")))
+(dax/setenv "DAX_LIVE_JANET_ARGS" (string/join args ","))
+JANET
+live_janet_output=$(printf '%s\n' \
+  'shopt -s expand_aliases' \
+  "source $tmp/live-source.janet one two" \
+  'echo live=$DAX_LIVE_JANET_VALUE hook=$DAX_LIVE_JANET_HOOK args=$DAX_LIVE_JANET_ARGS' \
+  'dax_live_janet_alias' | "$root/dax")
+for expected in 'live=loaded' 'hook=ran' 'args=one,two' 'live-janet-alias'; do
+  if ! printf '%s\n' "$live_janet_output" | grep -Fq "$expected"; then
+    printf 'smoke test failed: Janet source did not apply in the running shell (%s)\n' "$expected" >&2
+    printf '%s\n' "$live_janet_output" >&2
+    exit 1
+  fi
+done
+
+cat > "$tmp/dot-source.janet" <<'JANET'
+(dax/setenv "DAX_DOT_JANET_VALUE" "loaded")
+JANET
+dot_janet_output=$(printf '%s\n' ". $tmp/dot-source.janet" 'echo dot-source=$DAX_DOT_JANET_VALUE' | "$root/dax")
+if ! printf '%s\n' "$dot_janet_output" | grep -Fq 'dot-source=loaded'; then
+  printf 'smoke test failed: dot did not source Janet in the current shell\n' >&2
+  printf '%s\n' "$dot_janet_output" >&2
+  exit 1
+fi
+
+cat > "$tmp/live-source-error.janet" <<'JANET'
+echo JANET_SOURCE_FELL_BACK_TO_SHELL
+JANET
+set +e
+live_janet_error=$("$root/dax" -c "source $tmp/live-source-error.janet" 2>&1)
+live_janet_error_status=$?
+set -e
+if [[ $live_janet_error_status -eq 0 ]] || printf '%s\n' "$live_janet_error" | grep -Fq 'JANET_SOURCE_FELL_BACK_TO_SHELL'; then
+  printf 'smoke test failed: Janet source error fell back to shell parsing\n' >&2
+  printf '%s\n' "$live_janet_error" >&2
+  exit 1
+fi
+
+output=$(cd "$tmp" && printf '%s\n' \
+  'false; echo status=$?' \
+  'true && echo and-works' \
+  'false && echo and-skipped' \
+  'false || echo or-works' \
+  'true || echo or-skipped' \
+  '! false; echo not-status=$?' \
+  'echo chain-start && false || echo chain-recovered' \
+  'echo "&&"' \
+  'export DAX_TEST_VALUE=hello; echo $DAX_TEST_VALUE' \
+  'unset DAX_TEST_VALUE; echo unset=[$DAX_TEST_VALUE]' \
+  'setopt allexport; DAX_ALL=exported; env | grep ^DAX_ALL=; unsetopt allexport; unset DAX_ALL' \
+  'setopt nounset; echo $DAX_NEVER_SET; echo nounset-status=$?; unsetopt nounset' \
+  "DAX_SHELL_ONLY=private; echo shell-only=\$DAX_SHELL_ONLY" \
+  'echo literal=$HOME quoted=$HOME' \
+  "echo 'single-quoted=\$HOME'" \
+  'env | grep ^DAX_SHELL_ONLY=; echo unexported-status=$?' \
+  'echo redirected > output.txt; cat output.txt' \
+  "sh -c 'echo stderr-only >&2' 2> stderr.txt; cat stderr.txt" \
+  "sh -c 'echo combined-out; echo combined-err >&2' &> combined.txt; cat combined.txt" \
+  'read DAX_READ < input.txt; echo read=$DAX_READ' \
+  'read DAX_FIRST DAX_REST < fields.txt; echo read-fields=$DAX_FIRST:$DAX_REST' \
+  'read DAX_EOF < /dev/null; echo read-eof=$?' \
+  'read DAX_AGAIN < input.txt; echo read-again=$DAX_AGAIN' \
+  'echo piped | tr a-z A-Z' \
+  'pushd /; pwd; popd; pwd' \
+  'cd /; cd -; pwd' \
+  'dirs' \
+  'function greet ( ) { local DAX_LOCAL=private; echo $1:$DAX_LOCAL; return 7; }' \
+  'greet friend' \
+  'echo function-status=$?' \
+  'echo leaked=[$DAX_LOCAL]' \
+  'source $DAX_TEST_SOURCE' \
+  'echo $DAX_TEST_SOURCE_VALUE' \
+  'sourced script' \
+  'test 3 -gt 2; echo test-status=$?' \
+  'test -n value -a 4 -ge 3; echo compound-test=$?' \
+  'printf "printf=%s:%d\n" ok 4' \
+  "printf '%q' invalid; echo printf-invalid=\$?" \
+  "test -unsupported value; echo test-invalid=\$?" \
+  "sh -c 'exit 9'; echo external-status=\$?" \
+  "missing-dax-command; echo missing-status=\$?" \
+  "command missing-dax-command; echo command-missing-status=\$?" \
+  'set -- -abvalue; getopts ab: DAX_OPT; echo option=$DAX_OPT; getopts ab: DAX_OPT; echo option=$DAX_OPT arg=$OPTARG' \
+  'set -- first second; shift; echo shifted=$1' \
+  'eval echo eval-ok' \
+  'readonly DAX_LOCK=locked' \
+  'DAX_LOCK=changed; echo readonly=$DAX_LOCK' \
+  'type echo' \
+  'command -v echo' \
+  'hash echo; hash; hash -d echo; hash -r' \
+  'sleep 1 &; kill -STOP %1; sleep 0.1; jobs; bg %1; wait %1; echo wait-status=$?' \
+  'sleep 0.1 &; fg %1; echo fg-status=$?' \
+  'fg %99; echo invalid-job-status=$?' \
+  'sleep 0.2 &; disown %1; echo disown-status=$?' \
+  'alias hi="echo alias-value"' \
+  'hi' \
+  'builtin echo builtin-value' \
+  'whence cd' \
+  'trap "echo signal-trap" USR1' \
+  'kill -USR1 $$' \
+  'echo after-signal' \
+  'trap "echo exit-trap" EXIT' \
+  'exit' | env HOME="$tmp" DAX_TEST_SOURCE="$tmp/source.dax" "$root/dax" -i 2>"$tmp/shell.stderr")
+
+grep -Fq 'DAX_LOCK: readonly variable' "$tmp/shell.stderr"
+[[ $(grep -Fxc 'dax: missing-dax-command: command not found' "$tmp/shell.stderr") -eq 2 ]]
+if grep -Fq 'execvp:' "$tmp/shell.stderr"; then
+  printf 'smoke test failed: internal execvp diagnostic reached the user\n' >&2
+  exit 1
+fi
+grep -Fq 'DAX_NEVER_SET: unbound variable' "$tmp/shell.stderr"
+
+for expected in \
+  'status=1' \
+  'and-works' \
+  'or-works' \
+  'not-status=0' \
+  'chain-start' \
+  'chain-recovered' \
+  '&&' \
+  'hello' \
+  'unset=[]' \
+  'DAX_ALL=exported' \
+  'nounset-status=1' \
+  'shell-only=private' \
+  'single-quoted=$HOME' \
+  'unexported-status=1' \
+  'redirected' \
+  'stderr-only' \
+  'combined-out' \
+  'combined-err' \
+  'read=read from input' \
+  'read-fields=one:two three' \
+  'read-eof=1' \
+  'read-again=read from input' \
+  '/' \
+  "$tmp" \
+  'PIPED' \
+  'friend:private' \
+  'leaked=[]' \
+  'function-status=7' \
+  'from-source' \
+  'sourced:script' \
+  'test-status=0' \
+  'compound-test=0' \
+  'printf=ok:4' \
+  'printf-invalid=0' \
+  'test-invalid=2' \
+  'external-status=9' \
+  'missing-status=127' \
+  'command-missing-status=127' \
+  'option=a' \
+  'option=b arg=value' \
+  'shifted=second' \
+  'eval-ok' \
+  'readonly=locked' \
+  'echo is a shell builtin' \
+  'invalid-job-status=1' \
+  'disown-status=0' \
+  'wait-status=0' \
+  'Stopped' \
+  'fg-status=0' \
+  'alias-value' \
+  'builtin-value' \
+  'cd is a shell builtin' \
+  'signal-trap' \
+  'after-signal' \
+  'exit-trap'; do
+  if ! printf '%s\n' "$output" | grep -Fq "$expected"; then
+    printf 'smoke test failed: expected output containing %s\n' "$expected" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+done
+
+python3 "$root/tests/interactive/interrupt.py" "$root/dax"
+python3 "$root/tests/interactive/colors.py" "$root/dax"
+
+unicode_printf_output=$("$root/dax" -c 'printf "%b\n" "smile=\u263a"')
+if [[ $unicode_printf_output != 'smile=☺' ]]; then
+  printf 'smoke test failed: printf %%b did not expand the Unicode escape\n' >&2
+  printf 'output=<%s>\n' "$unicode_printf_output" >&2
+  exit 1
+fi
+
+non_executable="$tmp/not-executable"
+printf '#!/bin/sh\nexit 0\n' > "$non_executable"
+chmod 0644 "$non_executable"
+set +e
+"$root/dax" -c "$non_executable" 2>"$tmp/non-executable.stderr"
+non_executable_status=$?
+set -e
+if [[ $non_executable_status -ne 126 ]] ||
+   ! grep -Fq "dax: $non_executable: Permission denied" "$tmp/non-executable.stderr" ||
+   grep -Fq 'execvp:' "$tmp/non-executable.stderr"; then
+  printf 'smoke test failed: non-executable command diagnostic/status were unexpected\n' >&2
+  cat "$tmp/non-executable.stderr" >&2
+  exit 1
+fi
+
+command_output=$("$root/dax" -c 'false || echo command-mode')
+if [[ $command_output != 'command-mode' ]]; then
+  printf 'smoke test failed: dax -c produced unexpected output: %s\n' "$command_output" >&2
+  exit 1
+fi
+expansion_output=$("$root/dax" -c "cd '$tmp'; DAX_FIELDS=\"one two\"; echo fields=\$DAX_FIELDS; echo *.txt; echo '*.txt'")
+printf '%s\n' "$expansion_output" | grep -Fq 'fields=one two'
+printf '%s\n' "$expansion_output" | grep -Fq 'alpha.txt beta.txt combined.txt fields.txt input.txt output.txt stderr.txt'
+printf '%s\n' "$expansion_output" | grep -Fq '*.txt'
+set +e
+"$root/dax" -c 'false'
+command_status=$?
+set -e
+if [[ $command_status -ne 1 ]]; then
+  printf 'smoke test failed: dax -c returned status %s, expected 1\n' "$command_status" >&2
+  exit 1
+fi
+[[ $("$root/dax" -c 'if [[ value == v* && -n value ]]; then echo conditional; fi') == conditional ]]
+[[ $("$root/dax" -c 'if [[ value =~ ^val ]]; then echo regex; fi') == regex ]]
+[[ $("$root/dax" -c '(( n=2, n*=3 )); echo $n') == 6 ]]
+[[ $("$root/dax" -c 'for ((i=0; i<3; i++)); do echo $i; done') == $'0\n1\n2' ]]
+select_output=$("$root/dax" -c 'printf "2\\n" | select item in first second; do echo "selected=$item reply=$REPLY"; break; done' 2>&1)
+if ! printf '%s\n' "$select_output" | grep -Fq 'selected=second reply=2'; then
+  printf 'smoke test failed: select did not assign the selected item and REPLY\n' >&2
+  printf '%s\n' "$select_output" >&2
+  exit 1
+fi
+[[ $("$root/dax" -c 'DAX_ARRAY=(one "two words"); DAX_ARRAY+=(three); for item in "${DAX_ARRAY[@]}"; do echo "<$item>"; done; echo ${#DAX_ARRAY[@]}; DAX_ARRAY[4]=five; echo ${DAX_ARRAY[4]}') == $'<one>\n<two words>\n<three>\n3\nfive' ]]
+[[ $("$root/dax" -c 'cat <<< "here string"') == 'here string' ]]
+[[ $("$root/dax" -c 'cat <(printf process-substitution)') == 'process-substitution' ]]
+[[ $("$root/dax" -c 'printf process-output > >(cat)') == 'process-output' ]]
+coproc_output=$("$root/dax" -c 'coproc { cat; }; printf "coproc smoke\\n" >&"${COPROC[1]}"; exec {COPROC[1]}>&-; read -r -u "${COPROC[0]}" line; wait "$COPROC_PID"; echo "$line"')
+[[ $coproc_output == 'coproc smoke' ]]
+time_output=$("$root/dax" -c 'time -p true; echo timed-status=$?' 2>&1)
+if ! printf '%s\n' "$time_output" | grep -Eq '^real [0-9]+([.][0-9]+)?$' ||
+   ! printf '%s\n' "$time_output" | grep -Fq 'timed-status=0'; then
+  printf 'smoke test failed: time -p output or command status was incorrect\n' >&2
+  printf '%s\n' "$time_output" >&2
+  exit 1
+fi
+[[ $("$root/dax" -c 'echo $((2 + 3 * 4))') == 14 ]]
+[[ $("$root/dax" -c 'echo ~') == "$HOME" ]]
+[[ $("$root/dax" -c 'for x; do echo "<$x>"; done' dax one '' two) == $'<one>\n<>\n<two>' ]]
+[[ $("$root/dax" -c 'DAX_SMOKE_PATH=~/bin; echo $DAX_SMOKE_PATH') == "$HOME/bin" ]]
+[[ $("$root/dax" -c 'echo ${HOME##*/}') == "${HOME##*/}" ]]
+descriptor_output=$("$root/dax" -c "sh -c 'echo out; echo err >&2' 2>&1")
+[[ $descriptor_output == $'out\nerr' ]]
+set +e
+incomplete_output=$("$root/dax" -c 'echo must-not-run; if true; then' 2>&1)
+incomplete_status=$?
+set -e
+if [[ $incomplete_status -ne 2 ]] || printf '%s\n' "$incomplete_output" | grep -Fq 'must-not-run' ||
+   ! printf '%s\n' "$incomplete_output" | grep -Fq 'Missing fi for if statement'; then
+  printf 'smoke test failed: incomplete syntax executed a partial command\n' >&2
+  printf '%s\n' "$incomplete_output" >&2
+  exit 1
+fi
+set +e
+quote_error_output=$("$root/dax" -c 'echo must-not-run; echo "unterminated' 2>&1)
+quote_error_status=$?
+set -e
+if [[ $quote_error_status -ne 2 ]] || printf '%s\n' "$quote_error_output" | grep -Fq 'must-not-run' ||
+   ! printf '%s\n' "$quote_error_output" | grep -Fq 'Unterminated double quote' ||
+   ! printf '%s\n' "$quote_error_output" | grep -Fq 'line 1, column'; then
+  printf 'smoke test failed: unterminated quote lacked a source-aware parse error\n' >&2
+  printf '%s\n' "$quote_error_output" >&2
+  exit 1
+fi
+set +e
+function_error_output=$("$root/dax" -c $'function bad ( ) {\n  if true; then\n    echo no\n}; bad' 2>&1)
+function_error_status=$?
+set -e
+if [[ $function_error_status -ne 2 ]] ||
+   ! printf '%s\n' "$function_error_output" | grep -Fq 'line 3, column 12: Missing fi for if statement'; then
+  printf 'smoke test failed: function body lost its source location\n' >&2
+  printf '%s\n' "$function_error_output" >&2
+  exit 1
+fi
+alias_error_output=$(printf '%s\n' 'shopt -s expand_aliases' 'alias bad="[[ x == x ]] && echo alias-ok"' '   bad' 'exit 0' |
+  env HOME="$tmp" "$root/dax" 2>&1)
+if ! printf '%s\n' "$alias_error_output" | grep -Fxq 'alias-ok'; then
+  printf 'smoke test failed: [[ ]] did not execute through an alias\n' >&2
+  printf '%s\n' "$alias_error_output" >&2
+  exit 1
+fi
+interactive_function_error=$(printf '%s\n' 'function bad ( ) {' '  echo no' '  [[ x ]] && echo function-ok' '}' 'bad' 'exit 0' |
+  env HOME="$tmp" "$root/dax" 2>&1)
+if ! printf '%s\n' "$interactive_function_error" | grep -Fxq 'function-ok' ||
+   printf '%s\n' "$interactive_function_error" | grep -Fxq 'echo no'; then
+  printf 'smoke test failed: [[ ]] did not execute in a multiline function\n' >&2
+  printf '%s\n' "$interactive_function_error" >&2
+  exit 1
+fi
+set +e
+multiline_error_output=$("$root/dax" -c $'echo must-not-run;\nif true; then' 2>&1)
+multiline_error_status=$?
+set -e
+if [[ $multiline_error_status -ne 2 ]] || printf '%s\n' "$multiline_error_output" | grep -Fq 'must-not-run' ||
+   ! printf '%s\n' "$multiline_error_output" | grep -Fq 'line 2, column'; then
+  printf 'smoke test failed: multiline parser errors lost their source location\n' >&2
+  printf '%s\n' "$multiline_error_output" >&2
+  exit 1
+fi
+set +e
+expansion_error_output=$("$root/dax" -c 'echo ${DAX_REQUIRED:?required}' 2>&1)
+expansion_error_status=$?
+set -e
+if [[ $expansion_error_status -ne 1 ]] ||
+   ! printf '%s\n' "$expansion_error_output" | grep -Fq 'line 1, column 6: word expansion failed' ||
+   ! printf '%s\n' "$expansion_error_output" | grep -Fq 'DAX_REQUIRED: required'; then
+  printf 'smoke test failed: word expansion error lacked its token location\n' >&2
+  printf '%s\n' "$expansion_error_output" >&2
+  exit 1
+fi
+
+cat > "$tmp/control.dax" <<'DAX'
+echo before-script
+function script_greet ( ) {
+  echo function-from-script
+}
+if true
+then
+  script_greet
+else
+  echo wrong-branch
+fi
+for script_item in first second; do
+  echo item=$script_item
+done
+DAX
+script_output=$("$root/dax" --script "$tmp/control.dax")
+printf '%s\n' "$script_output" | grep -Fq 'before-script'
+printf '%s\n' "$script_output" | grep -Fq 'function-from-script'
+printf '%s\n' "$script_output" | grep -Fq 'item=first'
+printf '%s\n' "$script_output" | grep -Fq 'item=second'
+if printf '%s\n' "$script_output" | grep -Fq 'wrong-branch'; then
+  printf 'smoke test failed: if branch was not selected correctly\n' >&2
+  exit 1
+fi
+
+janet_script="$tmp/verify.janet"
+cat > "$janet_script" <<'JANET'
+(assert (= (length args) 2))
+(assert (= (args 0) "first"))
+(assert (= (dax/cwd) (os/cwd)))
+(def original-cwd (dax/cwd))
+(def canonical-tmp (os/realpath "/tmp"))
+(assert (dax/cd "/tmp"))
+(assert (= (dax/cwd) canonical-tmp))
+(assert (dax/cd original-cwd))
+(assert (dax/setenv "DAX_JANET_LIVE" "yes"))
+(assert (= (os/getenv "DAX_JANET_LIVE") "yes"))
+(def result (dax/execute ["printf" "janet-execute-ok\n"]))
+(assert (= (result :stdout) "janet-execute-ok\n"))
+(assert (= (result :exit-code) 0))
+(def injected (dax/execute ["printf" "%s" "$(touch $DAX_JANET_INJECTED)"]))
+(assert (= (injected :stdout) "$(touch $DAX_JANET_INJECTED)"))
+(def env-result (dax/execute ["printenv" "DAX_JANET_ENV"] {:env {"DAX_JANET_ENV" "from-options"}}))
+(assert (= (string/trim (env-result :stdout)) "from-options"))
+(def timed (dax/execute ["sleep" "2"] {:timeout-ms 40}))
+(assert (timed :timed-out))
+(def child-timeout (dax/execute ["sh" "-c" "sleep 30 & echo $!; wait"] {:timeout-ms 60}))
+(assert (child-timeout :timed-out))
+(def child-pid (string/trim (child-timeout :stdout)))
+(def child-probe (dax/execute ["kill" "-0" child-pid]))
+(assert (not= (child-probe :exit-code) 0))
+(def limited (dax/execute ["printf" "123456"] {:max-output-bytes 3}))
+(assert (= (limited :stdout) "123"))
+(assert (limited :truncated))
+(def linux? (= (os/getenv "DAX_TEST_PLATFORM") "Linux"))
+(def session (dax/session-create {:workspace "/tmp" :timeout-ms 5000 :network false}))
+(if linux?
+  (do
+    (def session-result (dax/session-execute session ["pwd"]))
+    (assert (= (string/trim (session-result :stdout)) canonical-tmp))
+    (assert (= (session-result :exit-code) 0))
+    (def python (os/which :python3))
+    (when python
+      (def denied-net (dax/session-execute session [python "-c" "import socket; socket.socket()"]))
+      (assert (not= (denied-net :exit-code) 0))
+      (assert (string/find "Operation not permitted" (denied-net :stderr)))))
+  (do
+    (def unsupported (dax/session-execute session ["pwd"]))
+    (assert (= (unsupported :exit-code) 125))
+    (assert (string/find "requested sandbox is unsupported" (unsupported :stderr)))))
+(assert (dax/session-close session))
+(assert (= (dax/session-close session) false))
+JANET
+DAX_TEST_PLATFORM="$(uname -s)" DAX_JANET_INJECTED="$tmp/injected" "$root/dax" --janet "$janet_script" first second
+if [[ -e "$tmp/injected" ]]; then
+  printf 'smoke test failed: dax/execute interpreted an argv value as shell source\n' >&2
+  exit 1
+fi
+printf '9\n' > "$tmp/status.janet"
+set +e
+"$root/dax" --janet "$tmp/status.janet"
+janet_status=$?
+set -e
+[[ $janet_status -eq 9 ]]
+
+mkdir -p "$tmp/config/dax"
+cat > "$tmp/config/dax/init.janet" <<'JANET'
+(dax/set-prompt "custom-prompt> ")
+(dax/alias "janet-greet" "echo Janet alias works")
+(dax/on :startup (fn [] (print "janet-startup-hook")))
+JANET
+config_output=$(printf '%s\n' 'janet-greet' 'exit' | XDG_CONFIG_HOME="$tmp/config" HOME="$tmp" "$root/dax" -i)
+printf '%s\n' "$config_output" | grep -Fq 'janet-startup-hook'
+printf '%s\n' "$config_output" | grep -Fq 'custom-prompt> '
+printf '%s\n' "$config_output" | grep -Fq 'Janet alias works'
+
+mkdir -p "$tmp/bad-config/dax"
+printf '(error "expected config failure")\n' > "$tmp/bad-config/dax/init.janet"
+config_error_output=$(printf '%s\n' 'echo prompt-after-config-error' 'exit' |
+  XDG_CONFIG_HOME="$tmp/bad-config" HOME="$tmp" "$root/dax" -i 2>&1)
+printf '%s\n' "$config_error_output" | grep -Fq 'Janet error: expected config failure'
+printf '%s\n' "$config_error_output" | grep -Fq 'prompt-after-config-error'
+
+if [[ $(uname -s) == Linux ]]; then
+  restricted_workspace="$tmp/restricted"
+  mkdir -p "$restricted_workspace"
+  ln -s /etc "$restricted_workspace/escape"
+  restricted_script="$tmp/restricted.janet"
+  cat > "$restricted_script" <<JANET
+(def session (dax/session-create {:workspace "$restricted_workspace" :timeout-ms 5000 :network false}))
+(def made (dax/session-execute session ["mkdir" "-p" "$restricted_workspace/candidate"]))
+(assert (= (made :exit-code) 0))
+(assert (= (dax/remove-tree "$restricted_workspace/candidate" "smoke test") false))
+(assert (dax/session-close session))
+JANET
+  if command -v script >/dev/null 2>&1; then
+    printf 'deny\n' | script -qec \
+      "\"$root/dax\" --janet-restricted \"$restricted_workspace\" \"$restricted_script\"" \
+      /dev/null >"$tmp/restricted-denial.log"
+    grep -Fq 'Dax approval request' "$tmp/restricted-denial.log"
+  elif command -v setsid >/dev/null 2>&1; then
+    setsid "$root/dax" --janet-restricted "$restricted_workspace" \
+      "$restricted_script" </dev/null >"$tmp/restricted-denial.log" 2>&1
+  else
+    printf 'smoke test skipped: cannot create a denied-approval session\n'
+  fi
+  [[ -d "$restricted_workspace/candidate" ]]
+
+  cat > "$tmp/restricted-bypass.janet" <<'JANET'
+(def session (dax/session-create {:timeout-ms 5000 :network false}))
+(assert (= (dax/request-approval "read-outside" ["/tmp"] "outside path") :denied))
+(assert (= (dax/remove-tree "/tmp" "outside workspace") false))
+(def outside (dax/session-execute session ["cat" "escape/passwd"]))
+(assert (not= (outside :exit-code) 0))
+(assert (dax/session-close session))
+(os/execute ["id"])
+JANET
+  set +e
+  "$root/dax" --janet-restricted "$restricted_workspace" "$tmp/restricted-bypass.janet" >"$tmp/restricted.err" 2>&1
+  restricted_status=$?
+  set -e
+  [[ $restricted_status -ne 0 ]]
+  grep -Fq 'unknown symbol os/execute' "$tmp/restricted.err"
+
+  cat > "$tmp/restricted-ffi.janet" <<'JANET'
+(ffi/dlopen "libc.so.6")
+JANET
+  set +e
+  "$root/dax" --janet-restricted "$restricted_workspace" "$tmp/restricted-ffi.janet" >"$tmp/restricted-ffi.err" 2>&1
+  restricted_status=$?
+  set -e
+  [[ $restricted_status -ne 0 ]]
+  grep -Fq 'unknown symbol ffi/dlopen' "$tmp/restricted-ffi.err"
+
+  if command -v script >/dev/null 2>&1; then
+    approved_workspace="$tmp/approved-workspace"
+    mkdir -p "$approved_workspace/remove-me"
+    printf 'temporary approval fixture\n' > "$approved_workspace/remove-me/file"
+    cat > "$approved_workspace/approve.janet" <<'JANET'
+(assert (dax/remove-tree "APPROVED_PATH" "smoke approval test"))
+JANET
+    sed -i "s|APPROVED_PATH|$approved_workspace/remove-me|" "$approved_workspace/approve.janet"
+    printf 'approve\n' | script -qec \
+      "\"$root/dax\" --janet-restricted \"$approved_workspace\" \"$approved_workspace/approve.janet\"" \
+      /dev/null >"$tmp/approval-terminal.log"
+    if [[ -e "$approved_workspace/remove-me" ]]; then
+      printf 'smoke test failed: approved workspace operation was not applied\n' >&2
+      cat "$tmp/approval-terminal.log" >&2
+      exit 1
+    fi
+  fi
+
+  cat > "$tmp/deny-landlock.c" <<'C'
+#include <errno.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef __NR_landlock_create_ruleset
+#error Landlock syscall number is required for this test
+#endif
+
+int main(int argc, char **argv) {
+  if (argc < 3 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return 125;
+  struct sock_filter landlock_filter[] = {
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_landlock_create_ruleset, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+  };
+  struct sock_filter seccomp_filter[] = {
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_prctl, 0, 3),
+    BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_SECCOMP, 0, 1),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+  };
+  struct sock_fprog program;
+  if (strcmp(argv[1], "landlock") == 0) {
+    program.len = 4;
+    program.filter = landlock_filter;
+  } else {
+    program.len = 6;
+    program.filter = seccomp_filter;
+  }
+  if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) return 125;
+  execvp(argv[2], argv + 2);
+  return 126;
+}
+C
+  if ! cc "$tmp/deny-landlock.c" -o "$tmp/deny-landlock"; then
+    printf 'smoke test failed: could not build Landlock-denial fixture\n' >&2
+    exit 1
+  fi
+  printf '(error "restricted script must not run")\n' > "$tmp/never-run.janet"
+  set +e
+  "$tmp/deny-landlock" landlock "$root/dax" --janet-restricted "$restricted_workspace" "$tmp/never-run.janet" >"$tmp/no-landlock.err" 2>&1
+  restricted_status=$?
+  set -e
+  [[ $restricted_status -eq 125 ]]
+  grep -Fq 'could not establish restricted Janet sandbox' "$tmp/no-landlock.err"
+  if grep -Fq 'restricted script must not run' "$tmp/no-landlock.err"; then
+    printf 'smoke test failed: restricted Janet ran without Landlock\n' >&2
+    exit 1
+  fi
+  set +e
+  "$tmp/deny-landlock" seccomp "$root/dax" --janet-restricted "$restricted_workspace" "$tmp/never-run.janet" >"$tmp/no-seccomp.err" 2>&1
+  restricted_status=$?
+  set -e
+  [[ $restricted_status -eq 125 ]]
+  grep -Fq 'could not establish restricted Janet sandbox' "$tmp/no-seccomp.err"
+  if grep -Fq 'restricted script must not run' "$tmp/no-seccomp.err"; then
+    printf 'smoke test failed: restricted Janet ran without seccomp\n' >&2
+    exit 1
+  fi
+else
+  printf 'restricted Janet checks skipped (Linux only)\n'
+fi
+
+history_home="$tmp/history-home"
+mkdir -p "$history_home"
+printf '%s\n' 'echo history-persisted' 'exit' |
+  env HOME="$history_home" "$root/dax" -i >/dev/null
+history_output=$(printf '%s\n' 'history' 'exit' | env HOME="$history_home" "$root/dax" -i)
+if ! printf '%s\n' "$history_output" | grep -Fq 'echo history-persisted'; then
+  printf 'smoke test failed: command history was not restored\n' >&2
+  exit 1
+fi
+
+multiline_output=$(printf '%s\n' 'if true' 'then' 'echo multiline-interactive' 'fi' 'exit' | env HOME="$tmp" "$root/dax" -i)
+printf '%s\n' "$multiline_output" | grep -Fq 'multiline-interactive'
+heredoc_output=$(printf '%s\n' 'cat <<EOF' 'interactive heredoc' 'EOF' 'exit' | env HOME="$tmp" "$root/dax" -i)
+printf '%s\n' "$heredoc_output" | grep -Fq 'interactive heredoc'
+background_redirection_output=$("$root/dax" -c "sh -c 'printf background-redirection' > '$tmp/background.txt' & wait; cat '$tmp/background.txt'" 2>&1)
+if ! printf '%s\n' "$background_redirection_output" | grep -Fq 'background-redirection'; then
+  printf 'smoke test failed: background redirection did not capture command output\n' >&2
+  printf '%s\n' "$background_redirection_output" >&2
+  exit 1
+fi
+
+errexit_output=$(printf '%s\n' 'set -e; false; echo should-not-run' | env HOME="$tmp" "$root/dax" || true)
+if printf '%s\n' "$errexit_output" | grep -Fxq 'should-not-run'; then
+  printf 'smoke test failed: errexit did not stop a command list\n' >&2
+  exit 1
+fi
+errexit_boundary_output=$(printf '%s\n' 'set -e' 'false && echo skipped' 'false' 'echo should-not-run' |
+  env HOME="$tmp" "$root/dax" 2>&1 || true)
+if printf '%s\n' "$errexit_boundary_output" | grep -Fxq 'should-not-run'; then
+  printf 'smoke test failed: errexit exemption leaked into the next input line\n' >&2
+  printf '%s\n' "$errexit_boundary_output" >&2
+  exit 1
+fi
+[[ $("$root/dax" -c 'trap '\''echo err:$?'\'' ERR; false; echo after') == $'err:1\nafter' ]]
+[[ $("$root/dax" -c 'trap '\''echo err'\'' ERR; if false; then echo wrong; fi; false | true; echo after') == 'after' ]]
+set +e
+errexit_err_output=$("$root/dax" -c 'set -e; trap '\''echo err'\'' ERR; false; echo wrong' 2>&1)
+errexit_err_status=$?
+set -e
+if [[ $errexit_err_status -ne 1 || $errexit_err_output != 'err' ]]; then
+  printf 'smoke test failed: ERR trap and errexit interaction\n' >&2
+  printf 'status=%s output=%s\n' "$errexit_err_status" "$errexit_err_output" >&2
+  exit 1
+fi
+[[ $("$root/dax" -c 'false | true; echo status=$?') == 'status=0' ]]
+[[ $("$root/dax" -c 'set -o pipefail; false | true; echo status=$?') == 'status=1' ]]
+set +e
+"$root/dax" -o pipefail -c 'false | true' >/dev/null
+pipefail_cli_status=$?
+set -e
+if [[ $pipefail_cli_status -ne 1 ]]; then
+  printf 'smoke test failed: -o pipefail did not affect the pipeline status\n' >&2
+  exit 1
+fi
+[[ $("$root/dax" +o pipefail -c 'false | true; echo status=$?') == 'status=0' ]]
+[[ $("$root/dax" -c 'for outer in a b; do for inner in 1 2; do echo "$outer$inner"; break 2; done; done; echo done') == $'a1\ndone' ]]
+[[ $("$root/dax" -c 'for outer in a b; do for inner in 1 2; do echo "$outer$inner"; continue 2; done; echo wrong; done') == $'a1\nb1' ]]
+
+set +e
+printf '%s\n' 'exit 9' | env HOME="$tmp" "$root/dax" >/dev/null 2>&1
+exit_code=$?
+set -e
+if [[ $exit_code -ne 9 ]]; then
+  printf 'smoke test failed: exit returned status %s, expected 9\n' "$exit_code" >&2
+  exit 1
+fi
+
+help_output=$("$root/dax" --help)
+printf '%s\n' "$help_output" | grep -Fq 'Usage: dax'
+printf '%s\n' "$help_output" | grep -Fq 'POSIX-style invocation'
+[[ $("$root/dax" --version) == 'dax development' ]]
+
+command_args_output=$("$root/dax" -c 'echo zero=$0 count=$# args=$1:$2' command-name one two)
+[[ $command_args_output == 'zero=command-name count=2 args=one:two' ]]
+script_path="$tmp/cli script.dax"
+printf '%s\n' 'echo zero=$0 count=$# args=$1:$2' >"$script_path"
+script_args_output=$("$root/dax" "$script_path" one two)
+[[ $script_args_output == "zero=$script_path count=2 args=one:two" ]]
+
+set +e
+"$root/dax" -e -c 'false' >/dev/null 2>&1
+errexit_status=$?
+"$root/dax" --unknown-dax-option -c 'echo should-not-run' >"$tmp/cli-error.out" 2>&1
+unknown_option_status=$?
+"$root/dax" -o >/dev/null 2>&1
+missing_option_status=$?
+set -e
+[[ $errexit_status -ne 0 && $unknown_option_status -eq 2 && $missing_option_status -eq 2 ]]
+if grep -Fq 'should-not-run' "$tmp/cli-error.out"; then
+  printf 'smoke test failed: invalid startup option still ran the command\n' >&2
+  exit 1
+fi
+
+leading_dash_script="$tmp/-leading.dax"
+printf '%s\n' 'echo end-options-ok' >"$leading_dash_script"
+(cd "$tmp" && [[ $("$root/dax" -- -leading.dax) == 'end-options-ok' ]])
+
+stdin_mode_output=$(printf '%s\n' 'echo stdin-auto' | "$root/dax")
+[[ $stdin_mode_output == 'stdin-auto' ]]
+stdin_args_output=$(printf '%s\n' 'echo zero=$0 count=$# args=$1:$2' |
+  "$root/dax" -s one two)
+[[ $stdin_args_output == "zero=$root/dax count=2 args=one:two" ]]
+interactive_stdin_args=$(printf '%s\n' 'echo count=$# args=$1:$2' 'exit' |
+  "$root/dax" -is one two)
+printf '%s\n' "$interactive_stdin_args" | grep -Fq 'count=2 args=one:two'
+login_command_output=$("$root/dax" -l -c 'echo login-flag-ok')
+[[ $login_command_output == 'login-flag-ok' ]]
+
+noglob_output=$(cd "$tmp" && "$root/dax" -f -c 'echo *.txt')
+[[ $noglob_output == '*.txt' ]]
+noexec_output=$("$root/dax" -n -c 'echo noexec-must-not-run')
+[[ -z $noexec_output ]]
+set_noexec_output=$("$root/dax" -c 'set -n; echo set-noexec-must-not-run')
+[[ -z $set_noexec_output ]]
+noexec_sideeffect="$tmp/noexec-sideeffect"
+"$root/dax" -n -c "echo \$(touch '$noexec_sideeffect')" >/dev/null
+[[ ! -e $noexec_sideeffect ]]
+xtrace_output=$(PS4='trace> ' "$root/dax" -x -c 'echo traced' 2>&1)
+printf '%s\n' "$xtrace_output" | grep -Fq 'trace> echo traced'
+verbose_output=$("$root/dax" -v -c 'echo verbose-command' 2>&1)
+printf '%s\n' "$verbose_output" | grep -Fq 'echo verbose-command'
+
+noclobber_file="$tmp/noclobber.txt"
+printf 'old\n' >"$noclobber_file"
+noclobber_output=$("$root/dax" -C -c "echo new > '$noclobber_file'; echo status=\$?; echo forced >| '$noclobber_file'; cat '$noclobber_file'" 2>&1)
+printf '%s\n' "$noclobber_output" | grep -Fq 'status=1'
+printf '%s\n' "$noclobber_output" | grep -Fq 'forced'
+
+notify_output=$("$root/dax" -b -c 'sleep 0.05 &; sleep 0.1')
+printf '%s\n' "$notify_output" | grep -Fq 'Done sleep 0.05'
+set_options_output=$("$root/dax" -c 'set -o')
+for option in allexport notify noclobber errexit pipefail noglob monitor noexec nounset verbose xtrace; do
+  printf '%s\n' "$set_options_output" | grep -Fq "$option"
+done
+cluster_output=$("$root/dax" -fx -c 'echo *.txt' 2>&1)
+printf '%s\n' "$cluster_output" | grep -Fq "+ echo '*.txt'"
+allexport_output=$("$root/dax" -a -c 'DAX_CLI_EXPORT=works; env | grep ^DAX_CLI_EXPORT=')
+[[ $allexport_output == 'DAX_CLI_EXPORT=works' ]]
+
+"$root/dax" "$root/tests/shell/bash-differential.dax"
+"$root/dax" "$root/tests/shell/posix-differential.dax"
+
+printf 'Dax smoke checks passed\n'

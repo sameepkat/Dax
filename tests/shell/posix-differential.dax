@@ -1,0 +1,45 @@
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+if command -v dash >/dev/null 2>&1; then
+  reference=(dash)
+elif command -v busybox >/dev/null 2>&1; then
+  reference=(busybox sh)
+else
+  printf 'POSIX differential checks skipped (dash and BusyBox are unavailable)\n'
+  exit 0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cases=(
+  'printf "plain output\n"'
+  'DAX_POSIX_VALUE="two words"; printf "<%s>\n" "$DAX_POSIX_VALUE"'
+  'unset DAX_POSIX_UNSET; printf "%s\n" "${DAX_POSIX_UNSET:-fallback}"'
+  'printf "hello\n" | tr a-z A-Z'
+  'false && printf wrong; true || printf wrong; printf done'
+  'if false; then printf wrong; elif true; then printf yes; else printf wrong; fi'
+  'for item in one two; do printf "<%s>\n" "$item"; done'
+  'while false; do printf wrong; done; printf done'
+  'case apple in b*) printf wrong ;; a*) printf matched ;; esac'
+  'cat <<EOF
+portable heredoc
+EOF'
+  'DAX_POSIX_VALUE=abc; printf "%s\n" "${#DAX_POSIX_VALUE}"'
+)
+
+for command in "${cases[@]}"; do
+  set +e
+  dash_output=$("${reference[@]}" -c "$command" 2>&1)
+  dash_status=$?
+  dax_output=$("$root/dax" -c "$command" 2>&1)
+  dax_status=$?
+  set -e
+  if [[ $dash_output != "$dax_output" || $dash_status -ne $dax_status ]]; then
+    printf 'POSIX shell mismatch for: %s\nReference: status=%s output=<%s>\nDax: status=%s output=<%s>\n' \
+      "$command" "$dash_status" "$dash_output" "$dax_status" "$dax_output" >&2
+    exit 1
+  fi
+done
+
+printf 'POSIX differential checks passed (%s cases)\n' "${#cases[@]}"

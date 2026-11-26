@@ -27,7 +27,7 @@
 #include <cwchar>
 #include <iomanip>
 #include <glob.h>
-#include <fnmatch.h>
+#include "pattern_match.hpp"
 #include <fcntl.h>
 #include <iostream>
 #include <limits>
@@ -598,12 +598,12 @@ bool command_path_is_ignored(const std::string &pathname) {
   const std::string patterns = variable != state.vars.end()
       ? variable->second : environment_value ? environment_value : std::string();
   size_t begin = 0;
-  const int flags = state.extglob ? FNM_EXTMATCH : 0;
+  const int flags = state.extglob ? DAX_PATTERN_EXTENDED : 0;
   while (begin <= patterns.size()) {
     const size_t end = patterns.find(':', begin);
     const std::string pattern = patterns.substr(
         begin, end == std::string::npos ? std::string::npos : end - begin);
-    if (!pattern.empty() && fnmatch(pattern.c_str(), pathname.c_str(), flags) == 0)
+    if (!pattern.empty() && dax_pattern_match(pattern.c_str(), pathname.c_str(), flags) == 0)
       return true;
     if (end == std::string::npos) break;
     begin = end + 1;
@@ -1155,7 +1155,7 @@ std::optional<int> run(const std::vector<std::string> &a) {
     for (const auto &pattern : patterns) {
       bool matched_pattern = false;
       for (const auto &name : builtins) {
-        if (fnmatch(pattern.c_str(), name.c_str(), 0) != 0) continue;
+        if (dax_pattern_match(pattern.c_str(), name.c_str(), 0) != 0) continue;
         matched_any = matched_pattern = true;
         const auto description = descriptions.find(name);
         const std::string summary = description == descriptions.end()
@@ -3034,16 +3034,16 @@ static bool globignore_has_patterns(const std::string &ignore_patterns) {
 
 static bool globignore_matches(const std::string &path,
                                const std::string &ignore_patterns) {
-  const int flags = FNM_PATHNAME |
-                    (shell_state().extglob ? FNM_EXTMATCH : 0) |
-                    (shell_state().nocaseglob ? FNM_CASEFOLD : 0);
+  const int flags = DAX_PATTERN_PATHNAME |
+                    (shell_state().extglob ? DAX_PATTERN_EXTENDED : 0) |
+                    (shell_state().nocaseglob ? DAX_PATTERN_CASEFOLD : 0);
   size_t begin = 0;
   while (begin <= ignore_patterns.size()) {
     const size_t end = ignore_patterns.find(':', begin);
     const std::string pattern = ignore_patterns.substr(
         begin, end == std::string::npos ? std::string::npos : end - begin);
     const std::string normalized_pattern = glob_ascii_ranges(pattern);
-    if (!normalized_pattern.empty() && fnmatch(normalized_pattern.c_str(), path.c_str(), flags) == 0)
+    if (!normalized_pattern.empty() && dax_pattern_match(normalized_pattern.c_str(), path.c_str(), flags) == 0)
       return true;
     if (end == std::string::npos) break;
     begin = end + 1;
@@ -3141,11 +3141,19 @@ static void sort_glob_matches(std::vector<std::string> &matches) {
         else if (config.key == GlobSortKey::Blocks && left_info.st_blocks != right_info.st_blocks)
           order = left_info.st_blocks < right_info.st_blocks ? -1 : 1;
         else if (config.key == GlobSortKey::Mtime)
+#if defined(__APPLE__)
+          order = compare_glob_timespec(left_info.st_mtimespec, right_info.st_mtimespec);
+        else if (config.key == GlobSortKey::Atime)
+          order = compare_glob_timespec(left_info.st_atimespec, right_info.st_atimespec);
+        else if (config.key == GlobSortKey::Ctime)
+          order = compare_glob_timespec(left_info.st_ctimespec, right_info.st_ctimespec);
+#else
           order = compare_glob_timespec(left_info.st_mtim, right_info.st_mtim);
         else if (config.key == GlobSortKey::Atime)
           order = compare_glob_timespec(left_info.st_atim, right_info.st_atim);
         else if (config.key == GlobSortKey::Ctime)
           order = compare_glob_timespec(left_info.st_ctim, right_info.st_ctim);
+#endif
       }
     }
     if (order == 0)
@@ -3232,14 +3240,14 @@ static std::vector<std::string> extglob_path_expand(const std::string &pattern) 
       if (!dir) continue;
       const bool explicit_dot = include_dotfiles || (!part.empty() && part.front() == '.');
       const std::string match_part = glob_ascii_ranges(part);
-      const int flags = (shell_state().extglob ? FNM_EXTMATCH : 0) |
-                        (shell_state().nocaseglob ? FNM_CASEFOLD : 0) |
-                        (include_dotfiles ? 0 : FNM_PERIOD);
+      const int flags = (shell_state().extglob ? DAX_PATTERN_EXTENDED : 0) |
+                        (shell_state().nocaseglob ? DAX_PATTERN_CASEFOLD : 0) |
+                        (include_dotfiles ? 0 : DAX_PATTERN_PERIOD);
       while (dirent *entry = readdir(dir)) {
         const std::string name = entry->d_name;
         if ((shell_state().globskipdots && (name == "." || name == "..")) ||
             (!explicit_dot && !name.empty() && name.front() == '.')) continue;
-        if (fnmatch(match_part.c_str(), name.c_str(), flags) != 0) continue;
+        if (dax_pattern_match(match_part.c_str(), name.c_str(), flags) != 0) continue;
         const std::string candidate = base.empty() ? name : base == "/" ? base + name : base + "/" + name;
         if (!last || trailing_slash) {
           struct stat info {};
@@ -4300,7 +4308,7 @@ void expand_words(std::vector<std::string> &words, WordExpansionMode mode) {
           const size_t character_size = size == 0 ? 1 : size;
           const std::string original = input.substr(offset, character_size);
           const bool matches = !pattern ||
-              fnmatch(pattern->c_str(), original.c_str(), pattern_flags) == 0;
+              dax_pattern_match(pattern->c_str(), original.c_str(), pattern_flags) == 0;
           if (matches) {
             const wchar_t mapped = uppercase ? std::towupper(character) : std::towlower(character);
             char encoded[MB_LEN_MAX];
@@ -4657,7 +4665,7 @@ void expand_words(std::vector<std::string> &words, WordExpansionMode mode) {
             }
           }
           return map_locale_case(text, case_transform == '^', !transform_all,
-                                 &pattern, shell_state().extglob ? FNM_EXTMATCH : 0);
+                                 &pattern, shell_state().extglob ? DAX_PATTERN_EXTENDED : 0);
         }
         return text;
       };
@@ -4797,8 +4805,8 @@ void expand_words(std::vector<std::string> &words, WordExpansionMode mode) {
       auto replace_parameter_value = [&](std::string text) {
         if (!replace_expansion || expanded_replace_pattern.empty()) return text;
         const std::string &pattern = expanded_replace_pattern;
-        const int pattern_flags = (shell_state().extglob ? FNM_EXTMATCH : 0) |
-                                  (shell_state().nocasematch ? FNM_CASEFOLD : 0);
+        const int pattern_flags = (shell_state().extglob ? DAX_PATTERN_EXTENDED : 0) |
+                                  (shell_state().nocasematch ? DAX_PATTERN_CASEFOLD : 0);
         size_t cursor = 0;
         while (cursor <= text.size()) {
           size_t match_start = std::string::npos, match_end = std::string::npos;
@@ -4807,14 +4815,14 @@ void expand_words(std::vector<std::string> &words, WordExpansionMode mode) {
           for (size_t start = first_start; start <= last_start; ++start) {
             if (replace_prefix && start != 0) break;
             if (replace_suffix) {
-              if (fnmatch(pattern.c_str(), text.substr(start).c_str(), pattern_flags) == 0) {
+              if (dax_pattern_match(pattern.c_str(), text.substr(start).c_str(), pattern_flags) == 0) {
                 match_start = start;
                 match_end = text.size();
                 break;
               }
             } else {
               for (size_t end = text.size() + 1; end-- > start; ) {
-                if (fnmatch(pattern.c_str(), text.substr(start, end - start).c_str(), pattern_flags) == 0) {
+                if (dax_pattern_match(pattern.c_str(), text.substr(start, end - start).c_str(), pattern_flags) == 0) {
                   match_start = start;
                   match_end = end;
                   break;
@@ -5123,23 +5131,23 @@ void expand_words(std::vector<std::string> &words, WordExpansionMode mode) {
         const auto expanded_pattern = expand_parameter_pattern(parameter_word);
         if (!expanded_pattern) { fail_expansion(); continue; }
         const std::string &pattern = *expanded_pattern;
-        const int pattern_flags = (shell_state().extglob ? FNM_EXTMATCH : 0) |
-                                  (shell_state().nocasematch ? FNM_CASEFOLD : 0);
+        const int pattern_flags = (shell_state().extglob ? DAX_PATTERN_EXTENDED : 0) |
+                                  (shell_state().nocasematch ? DAX_PATTERN_CASEFOLD : 0);
         if (prefix) {
           size_t match = std::string::npos;
           for (size_t n = 0; n <= value.size(); ++n)
-            if (fnmatch(pattern.c_str(), value.substr(0, n).c_str(), pattern_flags) == 0) { match = n; if (!longest) break; }
+            if (dax_pattern_match(pattern.c_str(), value.substr(0, n).c_str(), pattern_flags) == 0) { match = n; if (!longest) break; }
           if (match != std::string::npos) value.erase(0, match);
         } else {
           size_t match = std::string::npos;
           if (longest) {
             // The longest matching suffix starts at the smallest index.
             for (size_t n = 0; n <= value.size(); ++n)
-              if (fnmatch(pattern.c_str(), value.substr(n).c_str(), pattern_flags) == 0) { match = n; break; }
+              if (dax_pattern_match(pattern.c_str(), value.substr(n).c_str(), pattern_flags) == 0) { match = n; break; }
           } else {
             // The shortest matching suffix starts at the largest index.
             for (size_t n = value.size() + 1; n-- > 0; )
-              if (fnmatch(pattern.c_str(), value.substr(n).c_str(), pattern_flags) == 0) { match = n; break; }
+              if (dax_pattern_match(pattern.c_str(), value.substr(n).c_str(), pattern_flags) == 0) { match = n; break; }
           }
           if (match != std::string::npos) value.erase(match);
         }

@@ -12,11 +12,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install GNU Make
+      - name: Install GNU Make and Bash
         if: runner.os == 'macOS'
-        run: brew install make
+        run: |
+          brew install make bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - name: Build
         run: |
           if [ "$RUNNER_OS" = macOS ]; then gmake -j2; else make -j2; fi
       - name: Check execution
         run: ./dax -c 'echo portable-build-ok'
+      - name: Run tests
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then gmake test; else make test; fi
