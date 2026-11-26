@@ -196,7 +196,8 @@ std::optional<int> run_history_builtin(const std::vector<std::string> &a) {
     if (option == "-p" && a.size() >= 3) {
       for (size_t i = 2; i < a.size(); ++i) {
         char *expanded = nullptr;
-        const int status = history_expand(a[i].c_str(), &expanded);
+        std::string input = a[i];
+        const int status = history_expand(input.data(), &expanded);
         if (status < 0) {
           std::cerr << (expanded ? expanded : "history: expansion failed") << '\n';
           std::free(expanded);

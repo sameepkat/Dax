@@ -63,6 +63,10 @@ std::string history_entry_for_command(const std::string &command,
 
 bool renderer_started = false;
 bool renderer_has_suggestion = false;
+int renderer_suggestion_rows = 0;
+int renderer_suggestion_column = 0;
+int renderer_suggestion_end_column = 0;
+int renderer_suggestion_width = 80;
 std::string renderer_command_prefix;
 bool prompt_timeout_active = false;
 bool prompt_timeout_hit = false;
@@ -366,10 +370,15 @@ void dax_redisplay() {
   const std::string suggestion = current_suggestion();
   renderer_has_suggestion = !suggestion.empty();
   if (!suggestion.empty()) {
+    const int suggestion_row = row;
+    renderer_suggestion_column = column;
     output += color_code("suggestion");
     // Suggestions are part of the displayed line for layout purposes even
     // though Readline's point remains at the end of the typed prefix.
     append_display_text(output, suggestion, row, column, width);
+    renderer_suggestion_rows = row - suggestion_row;
+    renderer_suggestion_end_column = column;
+    renderer_suggestion_width = width;
     if (colors_enabled()) output += "\033[0m";
   }
   output += "\033[J";
@@ -386,6 +395,11 @@ int accept_suggestion(int count, int key) {
   if (suggestion.empty()) return rl_forward_char(count, key);
   rl_insert_text(suggestion.c_str());
   return 0;
+}
+
+int end_or_accept_suggestion(int count, int key) {
+  if (rl_point != rl_end) return rl_end_of_line(count, key);
+  return accept_suggestion(count, key);
 }
 
 std::string history_search_input;
@@ -430,9 +444,9 @@ void configure_readline() {
   rl_bind_keyseq("\eOB", search_history_forward);
   rl_bind_keyseq("\e[C", accept_suggestion);
   rl_bind_keyseq("\eOC", accept_suggestion);
-  rl_bind_keyseq("\e[F", accept_suggestion);
-  rl_bind_keyseq("\eOF", accept_suggestion);
-  rl_bind_keyseq("\e[4~", accept_suggestion);
+  rl_bind_keyseq("\e[F", end_or_accept_suggestion);
+  rl_bind_keyseq("\eOF", end_or_accept_suggestion);
+  rl_bind_keyseq("\e[4~", end_or_accept_suggestion);
 }
 } // namespace
 
@@ -623,7 +637,18 @@ int run_interactive_shell() {
     // The custom Readline renderer leaves the cursor exactly at rl_point;
     // Readline's newline handler does not advance the terminal in this mode.
     if (!input_interrupted) {
-      if (renderer_has_suggestion) std::cout << "\033[J";
+      if (renderer_has_suggestion) {
+        std::string erase = "\0337\r";
+        append_cursor_command(erase, 'C', renderer_suggestion_column);
+        for (int row = 0; row <= renderer_suggestion_rows; ++row) {
+          const int start = row == 0 ? renderer_suggestion_column : 0;
+          const int end = row == renderer_suggestion_rows ? renderer_suggestion_end_column : renderer_suggestion_width;
+          if (row) { erase += "\033[1B\r"; }
+          if (end > start) erase += "\033[" + std::to_string(end - start) + "X";
+        }
+        erase += "\0338";
+        std::cout << erase;
+      }
       std::cout << "\r\n";
       std::cout.flush();
     }
@@ -633,7 +658,7 @@ int run_interactive_shell() {
 
     if (!input_interrupted && shell_histexpand_enabled()) {
       char *expanded = nullptr;
-      const int expansion_status = history_expand(line.c_str(), &expanded);
+      const int expansion_status = history_expand(line.data(), &expanded);
       if (expansion_status < 0) {
         std::cerr << (expanded ? expanded : "dax: history expansion failed") << '\n';
         std::free(expanded);

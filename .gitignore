@@ -6,5 +6,8 @@ docs/
 tests/*
 !tests/history_suggestion.py
 scripts/
-.github/
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/portable-build.yml
 tests/

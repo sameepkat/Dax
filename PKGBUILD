@@ -6,7 +6,7 @@ pkgdesc="Customizable Unix shell with interactive features and Janet scripting"
 arch=('x86_64' 'i686' 'aarch64')
 url="https://github.com/sameepkat/Dax"
 license=('GPL3' 'MIT')
-depends=('readline')
+depends=('ncurses')
 makedepends=('git' 'gcc' 'make')
 source=("git+https://github.com/sameepkat/Dax.git#tag=v${pkgver}")
 sha256sums=('SKIP')

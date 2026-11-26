@@ -20,6 +20,12 @@ features.
 
 ## Build and run
 
+Building requires C and C++17 compilers, GNU Make, and terminal capability
+library development files (such as ncurses). GNU Readline is included in the
+source tree and linked into Dax. On macOS and FreeBSD, install GNU Make and
+run `gmake` in place of `make`. Set `CC` and `CXX` to select compilers; run
+`make clean` before changing the compiler or build flags.
+
 ```sh
 make
 ./dax

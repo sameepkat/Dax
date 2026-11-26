@@ -1,0 +1,22 @@
+name: Portable build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GNU Make
+        if: runner.os == 'macOS'
+        run: brew install make
+      - name: Build
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then gmake -j2; else make -j2; fi
+      - name: Check execution
+        run: ./dax -c 'echo portable-build-ok'
